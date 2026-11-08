@@ -66,7 +66,10 @@ export async function verifyWindowsInstaller({installer,workRoot,run=runInstalle
   const existing=registry.stdout?.trim();if(existing){const target=existsSync(existing)?realpathSync(existing):resolve(existing),rel=relative(realpathSync(workRoot),target);if(rel.startsWith('..')||isAbsolute(rel))throw Error('A real installation is already registered. Use a clean test account.');}
   const invokeSetup=async name=>{phase(name);try{return await run(installer,['/S','/D='+app],{cwd:workRoot,env,timeoutMs:240000,verbatim:true});}catch(error){diagnostics();throw error;}};
   await invokeSetup('Installing into the isolated test folder');
-  for(const path of ['StrataManaged.exe','runtime/runtime.mjs','resources/node/node.exe','resources/control/python/python.exe','host/server/index.mjs','host/dist/index.html','README.ja.txt'])assert(existsSync(join(app,path)),'Missing installed file: '+path);
+  for(const path of ['StrataManaged.exe','runtime/runtime.mjs','resources/desktop/StrataWindow.exe','resources/node/node.exe','resources/control/python/python.exe','host/server/index.mjs','host/dist/index.html','README.ja.txt'])assert(existsSync(join(app,path)),'Missing installed file: '+path);
+  const programs=await run('powershell.exe',['-NoLogo','-NoProfile','-Command',"[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); [Environment]::GetFolderPath('Programs')"],{cwd:workRoot,env});
+  const startMenu=join(programs.stdout.trim(),'Strata Managed Models');
+  for(const name of ['Tailscaleで共有','Tailscale共有を停止','Strataを停止'])assert(existsSync(join(startMenu,name+'.lnk')),'Missing Japanese Start Menu shortcut: '+name);
   const launcher=join(app,'StrataManaged.exe');
   const smoke=async name=>{phase(name);
     try{await run(launcher,['--smoke'],{cwd:app,env,timeoutMs:120000});}
@@ -84,7 +87,16 @@ export async function verifyWindowsInstaller({installer,workRoot,run=runInstalle
   };
   const first=await smoke('Checking a clean first-run profile');
   phase('Saving two user-selected API models and a controlled chat fixture');
-  const fixture=await normalProfile(port=>exerciseInstalledProfile(port));
+  let desktop;
+  const fixture=await normalProfile(async port=>{
+    const fixture=await exerciseInstalledProfile(port);
+    phase('Opening the installed WebView2 window without an external browser');
+    try{await run(launcher,['--desktop-smoke'],{cwd:app,env,timeoutMs:150000});}
+    catch(error){for(const file of ['logs/desktop-window.log','logs/desktop-launcher.log','logs/launcher.log'])if(existsSync(join(data,file)))console.error(readFileSync(join(data,file),'utf8').slice(-12000));throw error;}
+    desktop=JSON.parse(readFileSync(join(data,'desktop-smoke.json'),'utf8'));
+    assert.deepEqual(desktop,{ok:true,windowCreated:true,pageLoaded:true,renderer:'WebView2',loopback:true});
+    return fixture;
+  });
   const providerFile=join(data,'profile/data/model-providers.json'),chatFile=join(data,'profile/data/chats',fixture.session.id+'.json');
   const providerBytes=readFileSync(providerFile),chatBytes=readFileSync(chatFile);
   const userMarker=join(data,'keep-this-user-file.txt'),appMarker=join(app,'user-kept-note.txt');
@@ -96,8 +108,8 @@ export async function verifyWindowsInstaller({installer,workRoot,run=runInstalle
   phase('Uninstalling only the application');
   try{await run(join(app,'Uninstall.exe'),['/S'],{cwd:workRoot,env,timeoutMs:120000});}catch(error){diagnostics();throw error;}
   for(let i=0;i<100&&existsSync(launcher);i++)await wait(200);
-  assert(!existsSync(launcher),'The application launcher was not removed.');assert(!existsSync(join(app,'resources/node/node.exe')),'The bundled runtime was not removed.');
+  assert(!existsSync(launcher),'The application launcher was not removed.');assert(!existsSync(join(app,'resources/node/node.exe')),'The bundled runtime was not removed.');assert(!existsSync(join(app,'resources/desktop/StrataWindow.exe')),'The desktop executable was not removed.');
   assert(existsSync(userMarker),'Uninstall removed user data.');assert(existsSync(appMarker),'Uninstall removed an unrecognized file.');
   assert.deepEqual(readFileSync(providerFile),providerBytes,'Uninstall changed or removed the saved API models.');assert.deepEqual(readFileSync(chatFile),chatBytes,'Uninstall changed or removed the saved chat.');
-  const result={ok:true,installed:true,repaired:true,uninstalled:true,userDataRetained:true,unknownAppFileRetained:true,apiModelsPersisted:2,chatRetained:true,providerFileRetained:true,chatFileRetained:true,first,second};writeFileSync(join(workRoot,'installer-verification.json'),JSON.stringify(result,null,2));console.log('Windows install, selected API models, chat persistence, repair and uninstall/user-data retention: passed.');return result;
+  const result={ok:true,installed:true,repaired:true,uninstalled:true,userDataRetained:true,unknownAppFileRetained:true,apiModelsPersisted:2,chatRetained:true,providerFileRetained:true,chatFileRetained:true,desktop,first,second};writeFileSync(join(workRoot,'installer-verification.json'),JSON.stringify(result,null,2));console.log('Windows install, dedicated WebView2 window, selected API models, chat persistence, repair and uninstall/user-data retention: passed.');return result;
 }

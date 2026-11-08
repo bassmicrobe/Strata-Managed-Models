@@ -5,7 +5,7 @@ import {existsSync,mkdirSync,readFileSync,writeFileSync,renameSync,unlinkSync,op
 import {dirname,join,resolve,relative,isAbsolute,sep} from 'node:path';
 import {fileURLToPath,pathToFileURL} from 'node:url';
 import {randomUUID} from 'node:crypto';
-import {fetchForkRelease,stageForkRelease,FORK_REPOSITORY} from './fork-stage.mjs';
+import {fetchForkRelease,stageForkRelease,stageForkInstaller,FORK_REPOSITORY} from './fork-stage.mjs';
 import {readTailscaleConfig,planTailscale,applyTailscale,disableTailscale,tailscaleOrigin} from './tailscale.mjs';
 
 const sleep=ms=>new Promise(done=>setTimeout(done,ms));
@@ -88,16 +88,15 @@ async function updateControl(paths,active,release){
   const feed=`https://github.com/Niko1221/Strata/releases/download/${release.manifest.upstreamTag}/strata-feed.json`;
   await new Promise((ok,bad)=>{const child=spawn(join(paths.control,'python/python.exe'),[join(paths.control,'strata.py'),'update','--yes','--no-engine','--output','json','--feed',feed],{cwd:paths.control,env,windowsHide:true,stdio:['ignore','pipe','pipe']});let output='',expired=false;const timer=setTimeout(()=>{expired=true;},1200000);child.stdout.on('data',chunk=>{output=(output+chunk.toString('utf8')).slice(-2*1024*1024);});child.stderr.resume();child.once('error',()=>{clearTimeout(timer);bad(fail('The verified Control update could not start.'));});child.once('close',code=>{clearTimeout(timer);let result;try{result=JSON.parse(output.replace(/^\uFEFF/,'').trim());}catch{}code===0&&!expired&&result?.ok===true?ok():bad(fail('The verified Control update did not complete.'));});});
 }
-async function autoUpdate(paths,active,log){
-  let release;try{release=await fetchForkRelease();}catch{log('更新を確認できませんでした。保存済みの版を使います。');return active;}
-  if(!releaseIsNew(release,active))return active;
-  const prior=await ownedRecord(paths);if(prior){const state=await snapshot(prior);if(isBusy(state.native,state.serving,state.maintenance)){log('回答やモデルの処理中のため、更新を次回に回します。');return active;}}
+async function autoUpdate(paths,active,log,release){
+  if(!releaseIsNew(release,active))return {active,status:'current'};
+  const prior=await ownedRecord(paths);if(prior){const state=await snapshot(prior);if(isBusy(state.native,state.serving,state.maintenance)){log('回答やモデルの処理中のため、更新を次回に回します。');return {active,status:'deferred'};}}
   const candidate=validateActive(paths,await stageForkRelease({root:paths.dataRoot,release,pythonExe:join(paths.control,'python/python.exe'),log}));
   const id=randomUUID(),renew=()=>atomicJson(paths.maintenanceFile,{pid:process.pid,id,reason:'update',expiresAt:Date.now()+120000});renew();const timer=setInterval(renew,20000);timer.unref();
   let backup,promoted=false,models=[],controlAttempted=false;
   const controlPointer=join(paths.dataRoot,'components/control/active.json'),oldControl=existsSync(controlPointer)?json(controlPointer):null;
   try{
-    const running=await ownedRecord(paths);if(running){const state=await snapshot(running);if(!state.maintenance.enabled||!state.maintenance.active||isBusy(state.native,state.serving,state.maintenance))return active;models=state.native.instances.filter(i=>i.status==='ready').map(i=>i.model);}
+    const running=await ownedRecord(paths);if(running){const state=await snapshot(running);if(!state.maintenance.enabled||!state.maintenance.active||isBusy(state.native,state.serving,state.maintenance))return {active,status:'deferred'};models=state.native.instances.filter(i=>i.status==='ready').map(i=>i.model);}
     // Let the last completed answer's autosave settle; new inference is already blocked.
     await sleep(1500);
     backup=join(paths.dataRoot,'backups',new Date().toISOString().replace(/[:.]/g,'-')+'-'+randomUUID().slice(0,8));mkdirSync(backup,{recursive:true});if(existsSync(paths.profile))cpSync(paths.profile,join(backup,'profile'),{recursive:true});
@@ -105,14 +104,14 @@ async function autoUpdate(paths,active,log){
     if(versionCompare(candidate.version,active.version)>0){controlAttempted=true;await updateControl(paths,active,release);}
     await smokeCandidate(paths,candidate);
     const next={...candidate,releaseTag:release.tag_name,previous:active};atomicJson(paths.activeFile,next);promoted=true;
-    const record=await startHost(paths,next);await restoreModels(record,models,id);log('新しいモデル切替版を反映しました。');return next;
+    const record=await startHost(paths,next);await restoreModels(record,models,id);log('新しいモデル切替版を反映しました。');return {active:next,status:'applied'};
   }catch(error){
     log('新しい版の起動を確認できなかったため、以前の版へ戻します。');
     const failed=await ownedRecord(paths);if(failed)await stopHost(paths,{record:failed,token:id});
     atomicJson(paths.activeFile,active);
     if(controlAttempted){if(oldControl)atomicJson(controlPointer,oldControl);else if(existsSync(controlPointer))unlinkSync(controlPointer);}
     if(promoted&&backup&&existsSync(join(backup,'profile'))){if(existsSync(paths.profile)){const quarantine=join(paths.dataRoot,'failed-profile-'+randomUUID());if(!contained(paths.dataRoot,quarantine)||!contained(paths.dataRoot,realpathSync(paths.profile)))throw error;renameSync(paths.profile,quarantine);}cpSync(join(backup,'profile'),paths.profile,{recursive:true});}
-    const record=await startHost(paths,active);await restoreModels(record,models,id);return active;
+    const record=await startHost(paths,active);await restoreModels(record,models,id);return {active,status:'rollback'};
   }finally{clearInterval(timer);try{if(json(paths.maintenanceFile).id===id)unlinkSync(paths.maintenanceFile);}catch{}}
 }
 async function makePrivate(paths){mkdirSync(paths.dataRoot,{recursive:true,mode:0o700});try{const helpers=await import(pathToFileURL(join(paths.host,'server/private-file.mjs')));helpers.makePrivateDir(paths.dataRoot);}catch{throw fail('Strata could not protect its application data folder.');}}
@@ -126,13 +125,22 @@ async function restartForSharing(paths,active,record){
 }
 async function openBrowser(url){await command('powershell.exe',['-NoLogo','-NoProfile','-NonInteractive','-Command',`Start-Process '${url.replace(/'/g,"''")}'`]);}
 export async function main(args=process.argv.slice(2),options={}){
-  if(args.some(arg=>!['--stop','--wait','--smoke','--no-browser','--models','--api','--tailscale','--tailscale-off'].includes(arg))||args.includes('--tailscale')&&args.includes('--tailscale-off')||args.includes('--smoke')&&(args.includes('--tailscale')||args.includes('--tailscale-off')))throw fail('Unknown launcher option.');
+  if(args.some(arg=>!['--stop','--wait','--smoke','--no-browser','--no-update','--desktop','--models','--api','--tailscale','--tailscale-off','--download-update'].includes(arg))||args.includes('--tailscale')&&args.includes('--tailscale-off')||args.includes('--smoke')&&(args.includes('--tailscale')||args.includes('--tailscale-off'))||args.includes('--download-update')&&args.some(arg=>!['--download-update','--desktop','--no-browser'].includes(arg)))throw fail('Unknown launcher option.');
   const paths=layout(options);if(!existsSync(paths.node)||!existsSync(join(paths.control,'python/python.exe')))throw fail('The bundled runtime is incomplete. Run the installer again.');
+  const showBrowser=options.openBrowser??openBrowser,checkRelease=options.fetchRelease??fetchForkRelease;
   await makePrivate(paths);mkdirSync(join(paths.dataRoot,'logs'),{recursive:true});
   const log=message=>writeFileSync(join(paths.dataRoot,'logs/launcher.log'),new Date().toISOString()+' '+message+'\n',{flag:'a',mode:0o600});
   if(args.includes('--stop')){await stopHost(paths);return{stopped:true};}
   const metadata=json(join(paths.appRoot,'managed-install.json'));
   const bundled=validateActive(paths,{version:metadata.version,commit:metadata.commit,releaseTag:metadata.releaseTag,hostRoot:paths.host});
+  if(args.includes('--download-update')){
+    const release=await checkRelease();
+    if(!release.installer||!releaseIsNew(release,bundled))throw fail('この Windows 版はすでに最新です。');
+    const installer=await stageForkInstaller({root:paths.dataRoot,release});
+    const setup=spawn(installer,['/D='+paths.appRoot],{cwd:paths.dataRoot,detached:true,stdio:'ignore',windowsVerbatimArguments:true,windowsHide:false,shell:false});
+    await new Promise((ok,bad)=>{setup.once('spawn',ok);setup.once('error',bad);});setup.unref();
+    return {ok:true,installerOpened:true,releaseTag:release.tag_name};
+  }
   let active=bundled;
   if(existsSync(paths.activeFile)){try{const saved=validateActive(paths,json(paths.activeFile));if(!bundledIsNewer(bundled,saved))active=saved;}catch{log('以前のアプリ保存先を確認できなかったため、インストール済みの版を使います。');}}
   if(args.includes('--smoke')){
@@ -147,22 +155,23 @@ export async function main(args=process.argv.slice(2),options={}){
     let record=await ownedRecord(paths);if(record){const state=await snapshot(record);if(isBusy(state.native,state.serving,state.maintenance))throw fail('回答やモデルの処理が終わってから、共有を停止してください。');}
     const result=await disableTailscale({dataRoot:paths.dataRoot});paths.tailscaleOrigin='';
     if(record&&sharingRestartNeeded(record,''))record=await restartForSharing(paths,active,record);
-    log('Tailscale共有を停止しました。');return result;
+    log('Tailscale共有を停止しました。');return {...result,localUrl:record?`http://127.0.0.1:${record.port}/#/chat`:null,tailscaleUrl:null};
   }
   let sharingPlan=null,savedSharing=null;
   try{savedSharing=readTailscaleConfig(paths.dataRoot);if(args.includes('--tailscale')||savedSharing)sharingPlan=await planTailscale({dataRoot:paths.dataRoot});}
   catch(error){if(args.includes('--tailscale'))throw error;log('Tailscale共有を再開できませんでした。ローカル画面を開きます。');}
   paths.tailscaleOrigin=sharingPlan?.url??savedSharing?.url??'';
-  try{active=await autoUpdate(paths,active,log);}catch{log('更新の検証に失敗しました。保存済みの版で起動します。');}
+  let updateStatus='unchanged',latest=null;
+  if(!args.includes('--no-update'))try{latest=await checkRelease();const update=await autoUpdate(paths,active,log,latest);active=update.active;updateStatus=update.status;}catch{updateStatus='unavailable';log('更新の検証に失敗しました。保存済みの版で起動します。');}
   let record=await ownedRecord(paths);if(record&&resolve(record.entry)!==resolve(join(active.hostRoot,'server/index.mjs'))){await stopHost(paths,{record});record=null;}
   if(record&&sharingRestartNeeded(record,paths.tailscaleOrigin))record=await restartForSharing(paths,active,record);
   if(!record)record=await startHost(paths,active);atomicJson(paths.activeFile,active);
   let shared=null;
-  if(sharingPlan){try{shared=await applyTailscale({dataRoot:paths.dataRoot,hostPort:record.port,plan:sharingPlan});log('Tailscale共有: '+shared.url);}catch(error){if(args.includes('--tailscale')){if(error.actionUrl&&!args.includes('--no-browser'))await openBrowser(error.actionUrl);throw error;}log('Tailscale共有を再開できませんでした。ローカル画面を開きます。');}}
+  if(sharingPlan){try{shared=await applyTailscale({dataRoot:paths.dataRoot,hostPort:record.port,plan:sharingPlan});log('Tailscale共有: '+shared.url);}catch(error){if(args.includes('--tailscale')){if(error.actionUrl&&!args.includes('--no-browser'))await showBrowser(error.actionUrl);throw error;}log('Tailscale共有を再開できませんでした。ローカル画面を開きます。');}}
   const first=!existsSync(join(paths.dataRoot,'first-run.json')),target=args.includes('--api')?'#/settings?section=Models':args.includes('--models')||first?'#/models':'#/chat';
-  const url=`${shared?.url??'http://127.0.0.1:'+record.port}/${target}`;
-  if(!args.includes('--no-browser')){await openBrowser(url);atomicJson(join(paths.dataRoot,'first-run.json'),{openedAt:new Date().toISOString()});}
-  return {ok:true,version:active.version,url,pid:record.pid,tailscale:!!shared};
+  const localUrl=`http://127.0.0.1:${record.port}/${target}`,url=shared?`${shared.url}/${target}`:localUrl;
+  if(!args.includes('--no-browser')){if(!args.includes('--desktop'))await showBrowser(url);atomicJson(join(paths.dataRoot,'first-run.json'),{openedAt:new Date().toISOString()});}
+  return {ok:true,version:active.version,releaseTag:active.releaseTag,updateStatus,installedReleaseTag:bundled.releaseTag,latestInstallerTag:latest?.installer&&releaseIsNew(latest,bundled)?latest.tag_name:null,url,localUrl,tailscaleUrl:shared?.url??null,pid:record.pid,tailscale:!!shared};
 }
 if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url)){
   try{console.log(JSON.stringify(await main()));}catch(error){const message=error instanceof Error?error.message:'Strata could not start.';try{const paths=layout();mkdirSync(join(paths.dataRoot,'logs'),{recursive:true});writeFileSync(join(paths.dataRoot,'logs/launcher.log'),new Date().toISOString()+' '+message+'\n',{flag:'a',mode:0o600});}catch{}console.error(message);process.exitCode=1;}

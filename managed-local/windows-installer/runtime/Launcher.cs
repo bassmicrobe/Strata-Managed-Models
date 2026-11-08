@@ -1,10 +1,12 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
 using System.Windows.Forms;
+using System.Web.Script.Serialization;
 
 internal static class Launcher {
     private static string Quote(string value) {
@@ -18,13 +20,53 @@ internal static class Launcher {
         }
         result.Append('\\', slashes * 2); result.Append('"'); return result.ToString();
     }
+    private static bool Has(string[] args, string value) { return Array.IndexOf(args, value) >= 0; }
+    private static Dictionary<string, object> Json(string value) {
+        return new JavaScriptSerializer { MaxJsonLength = 65536 }.Deserialize<Dictionary<string, object>>(value);
+    }
+    private static string Field(Dictionary<string, object> data, string key) {
+        object value; return data != null && data.TryGetValue(key, out value) ? value as string : null;
+    }
+    private static void WriteStream(string value, bool error) {
+        using (Stream stream = error ? Console.OpenStandardError() : Console.OpenStandardOutput()) {
+            byte[] bytes = Encoding.UTF8.GetBytes(value); stream.Write(bytes, 0, bytes.Length); stream.Flush();
+        }
+    }
+    private static Process StartWindow(string root, string data, string flag, string url, string share, string installed, string available) {
+        string window = Path.Combine(root, "resources", "desktop", "StrataWindow.exe");
+        if (!File.Exists(window)) throw new IOException("専用ウィンドウが見つかりません。最新版のインストーラーで上書きしてください。");
+        string arguments = "--managed --data-dir " + Quote(data);
+        if (flag != null) arguments += " " + flag;
+        if (!String.IsNullOrEmpty(url)) arguments += " --url " + Quote(url);
+        if (!String.IsNullOrEmpty(share)) arguments += " --share-url " + Quote(share);
+        if (!String.IsNullOrEmpty(installed) && !String.IsNullOrEmpty(available)) arguments += " --installed-release " + Quote(installed) + " --available-release " + Quote(available);
+        return Process.Start(new ProcessStartInfo(window, arguments) { WorkingDirectory = root, UseShellExecute = false, CreateNoWindow = true });
+    }
+    private static void CloseWindow(string root, string data) {
+        string record = Path.Combine(data, "desktop-process.json");
+        string exe = Path.Combine(root, "resources", "desktop", "StrataWindow.exe");
+        if (!File.Exists(record) || !File.Exists(exe)) return;
+        try {
+            int pid = Convert.ToInt32(Json(File.ReadAllText(record))["pid"]);
+            using (Process window = Process.GetProcessById(pid)) {
+                if (window.HasExited || !String.Equals(Path.GetFullPath(window.MainModule.FileName), Path.GetFullPath(exe), StringComparison.OrdinalIgnoreCase)) return;
+                using (Process close = StartWindow(root, data, "--exit-window", null, null, null, null)) {
+                    if (close == null || !close.WaitForExit(12000) || close.ExitCode != 0) throw new IOException("Strata のウィンドウを閉じられませんでした。");
+                }
+                if (!window.WaitForExit(20000)) throw new IOException("Strata のウィンドウが閉じるまでお待ちください。");
+            }
+        } catch (ArgumentException) { /* The recorded process already exited. */ }
+    }
     [STAThread]
     private static int Main(string[] args) {
-        bool quiet = false;
+        bool bridge = Has(args, "--desktop-bridge"), desktopSmoke = Has(args, "--desktop-smoke"), quit = Has(args, "--quit");
+        bool quiet = bridge || desktopSmoke;
         foreach (string arg in args) {
             if (arg == "--stop" || arg == "--smoke" || arg == "--no-browser") quiet = true;
-            if (arg != "--stop" && arg != "--wait" && arg != "--smoke" && arg != "--no-browser" && arg != "--models" && arg != "--api" && arg != "--tailscale" && arg != "--tailscale-off") return 2;
+            if (arg != "--stop" && arg != "--wait" && arg != "--smoke" && arg != "--no-browser" && arg != "--models" && arg != "--api" && arg != "--tailscale" && arg != "--tailscale-off" && arg != "--desktop-bridge" && arg != "--desktop-smoke" && arg != "--quit" && !(bridge && arg == "--download-update")) return 2;
         }
+        bool stopping = quit || Has(args, "--stop"), sharingOff = Has(args, "--tailscale-off");
+        bool openWindow = desktopSmoke || !quiet && !stopping && !sharingOff;
         string root = AppDomain.CurrentDomain.BaseDirectory;
         string data = Environment.GetEnvironmentVariable("STRATA_MANAGED_DATA_DIR") ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "StrataManaged");
         string mutexName;
@@ -33,27 +75,50 @@ internal static class Launcher {
         using (Mutex mutex = new Mutex(false, mutexName)) {
             try {
                 try { acquired = mutex.WaitOne(0); } catch (AbandonedMutexException) { acquired = true; }
-                if (!acquired) { if (!quiet) MessageBox.Show("Strata の起動または更新を処理しています。完了までお待ちください。", "Strata Managed Models", MessageBoxButtons.OK, MessageBoxIcon.Information); return 3; }
+                if (!acquired) { if (bridge) WriteStream("Strata の起動または更新を処理しています。完了までお待ちください。", true); else if (!quiet) MessageBox.Show("Strata の起動または更新を処理しています。完了までお待ちください。", "Strata Managed Models", MessageBoxButtons.OK, MessageBoxIcon.Information); return 3; }
                 string node = Path.Combine(root, "resources", "node", "node.exe");
                 string script = Path.Combine(root, "runtime", "runtime.mjs");
                 if (!File.Exists(node) || !File.Exists(script)) throw new IOException("The application files are incomplete. Run the installer again.");
                 StringBuilder arguments = new StringBuilder(Quote(script));
-                foreach (string arg in args) arguments.Append(" ").Append(Quote(arg));
+                foreach (string arg in args) if (arg != "--desktop-bridge" && arg != "--desktop-smoke" && arg != "--quit") arguments.Append(" ").Append(Quote(arg));
+                if (quit) arguments.Append(" --stop --wait");
+                if (openWindow || bridge) arguments.Append(" --desktop");
+                if (desktopSmoke) arguments.Append(" --no-browser --no-update");
                 ProcessStartInfo start = new ProcessStartInfo(node, arguments.ToString());
                 start.WorkingDirectory = root; start.UseShellExecute = false; start.CreateNoWindow = true; start.WindowStyle = ProcessWindowStyle.Hidden;
                 start.RedirectStandardOutput = true; start.RedirectStandardError = true;
                 start.StandardOutputEncoding = new UTF8Encoding(false); start.StandardErrorEncoding = new UTF8Encoding(false);
                 using (Process process = new Process()) {
-                    StringBuilder errors = new StringBuilder();
+                    StringBuilder errors = new StringBuilder(); string result = null;
                     process.StartInfo = start;
-                    process.OutputDataReceived += delegate(object sender, DataReceivedEventArgs e) { };
+                    process.OutputDataReceived += delegate(object sender, DataReceivedEventArgs e) { if (e.Data != null && e.Data.StartsWith("{") && e.Data.Length <= 65536) result = e.Data; };
                     process.ErrorDataReceived += delegate(object sender, DataReceivedEventArgs e) { if (e.Data != null && errors.Length < 4096) errors.AppendLine(e.Data); };
                     process.Start(); process.BeginOutputReadLine(); process.BeginErrorReadLine(); process.WaitForExit();
-                    if (process.ExitCode != 0 && !quiet) MessageBox.Show("Strata を起動できませんでした。\n\n" + errors.ToString() + "\nログ: " + Path.Combine(data, "logs", "launcher.log"), "Strata Managed Models", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                    if (process.ExitCode == 0 && !quiet && Array.IndexOf(args, "--tailscale-off") >= 0) MessageBox.Show("Tailscale共有を停止しました。", "Strata Managed Models", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                    return process.ExitCode;
+                    if (process.ExitCode != 0) {
+                        if (bridge) WriteStream(errors.ToString(), true);
+                        else if (!quiet) MessageBox.Show("Strata の操作を完了できませんでした。\n\n" + errors.ToString() + "\nログ: " + Path.Combine(data, "logs", "launcher.log"), "Strata Managed Models", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        return process.ExitCode;
+                    }
+                    if (bridge) { WriteStream((result ?? "{}") + "\n", false); return 0; }
+                    if (stopping) { CloseWindow(root, data); return 0; }
+                    if (openWindow || sharingOff && !quiet) {
+                        var response = Json(result ?? "{}"); string url = Field(response, "localUrl"), share = Field(response, "tailscaleUrl");
+                        if (openWindow && String.IsNullOrEmpty(url)) throw new IOException("Strata のローカル接続先を確認できませんでした。");
+                        using (Process window = StartWindow(root, data, desktopSmoke ? "--smoke" : sharingOff ? "--refresh-window" : null, url, share, Field(response,"installedReleaseTag"), Field(response,"latestInstallerTag"))) {
+                            if (window == null) throw new IOException("専用ウィンドウを起動できませんでした。");
+                            if (desktopSmoke) {
+                                if (!window.WaitForExit(60000)) { window.Kill(); throw new IOException("専用ウィンドウの検証が時間内に完了しませんでした。"); }
+                                return window.ExitCode;
+                            }
+                        }
+                        if (sharingOff) MessageBox.Show("Tailscale共有を停止しました。", "Strata Managed Models", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    }
+                    return 0;
                 }
-            } catch (Exception error) { if (!quiet) MessageBox.Show(error.Message, "Strata Managed Models", MessageBoxButtons.OK, MessageBoxIcon.Error); return 1; }
+            } catch (Exception error) {
+                try { string logs = Path.Combine(data, "logs"); Directory.CreateDirectory(logs); File.AppendAllText(Path.Combine(logs, "desktop-launcher.log"), error.Message + "\n", Encoding.UTF8); } catch { }
+                if (bridge) WriteStream(error.Message, true); else if (!quiet) MessageBox.Show(error.Message, "Strata Managed Models", MessageBoxButtons.OK, MessageBoxIcon.Error); return 1;
+            }
             finally { if (acquired) mutex.ReleaseMutex(); }
         }
     }

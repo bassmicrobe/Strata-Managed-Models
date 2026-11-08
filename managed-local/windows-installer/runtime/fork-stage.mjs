@@ -1,7 +1,7 @@
-/** Download only the CI-published model-switch host; the caller owns promotion and model lifecycle. */
+/** Download and verify CI-published host and Windows setup assets. The caller owns activation. */
 import {spawn} from 'node:child_process';
 import {createHash,randomUUID} from 'node:crypto';
-import {existsSync,lstatSync,mkdirSync,readFileSync,readdirSync,realpathSync,writeFileSync} from 'node:fs';
+import {existsSync,lstatSync,mkdirSync,readFileSync,readdirSync,realpathSync,renameSync,writeFileSync} from 'node:fs';
 import {dirname,isAbsolute,join,relative,resolve,sep} from 'node:path';
 
 export const FORK_REPOSITORY='bassmicrobe/Strata-Managed-Models';
@@ -25,6 +25,22 @@ function checkedPath(base,file,{equal=false,existing=false}={}){
 function assetUrl(repository,tag,name,value){
   try{const url=new URL(value);return url.protocol==='https:'&&url.hostname==='github.com'&&!url.username&&!url.password&&!url.search&&!url.hash
     &&url.pathname===`/${repository}/releases/download/${tag}/${name}`?url.href:null;}catch{return null;}
+}
+function assetApiUrl(repository,value){
+  const prefix=`https://api.github.com/repos/${repository}/releases/assets/`;
+  return typeof value==='string'&&value.startsWith(prefix)&&/^[1-9]\d*$/.test(value.slice(prefix.length))?value:null;
+}
+function assetEndpoint(repository,asset){
+  if(asset.id===undefined&&asset.url===undefined)return null;
+  const url=assetApiUrl(repository,asset.url);
+  if(!Number.isSafeInteger(asset.id)||asset.id<=0||!url||!url.endsWith('/'+asset.id))throw failure();
+  return url;
+}
+function installerIdentity(repository,tag,version,descriptor){
+  return descriptor&&descriptor.name===`Strata-Managed-Models-${version}-windows-x64-setup.exe`
+    &&Number.isSafeInteger(descriptor.size)&&descriptor.size>0&&descriptor.size<=MAX_ARCHIVE&&digestPattern.test(descriptor.sha256??'')
+    &&assetUrl(repository,tag,descriptor.name,descriptor.downloadUrl)
+    &&(!descriptor.apiUrl||assetApiUrl(repository,descriptor.apiUrl));
 }
 function responseUrl(response){
   if(!response.url)return;
@@ -78,11 +94,31 @@ export async function fetchForkRelease({repository=FORK_REPOSITORY,fetchImpl=fet
     const manifestUrl=assetUrl(repository,release.tag_name,MANIFEST,external[0].browser_download_url);
     const archiveUrl=assetUrl(repository,release.tag_name,ARCHIVE,archives[0].browser_download_url);
     if(!manifestUrl||!archiveUrl||external[0].size>MAX_MANIFEST)throw failure();
-    manifest=checkedManifest(JSON.parse((await fetchBytes(fetchImpl,manifestUrl,MAX_MANIFEST,timeoutMs)).toString('utf8')),{repository,version});
+    const manifestApiUrl=assetEndpoint(repository,external[0]),archiveApiUrl=assetEndpoint(repository,archives[0]);
+    manifest=checkedManifest(JSON.parse((await fetchBytes(fetchImpl,manifestApiUrl??manifestUrl,MAX_MANIFEST,timeoutMs)).toString('utf8')),{repository,version});
     if(archives[0].size!==manifest.archive.size||archives[0].digest&&archives[0].digest!==`sha256:${manifest.archive.sha256}`)throw failure();
+    let installer=null;
+    if(manifest.installer){
+      const matches=release.assets.filter(asset=>asset.name===manifest.installer.name);
+      if(matches.length!==1)throw failure();const asset=matches[0];
+      installer={...manifest.installer,downloadUrl:asset.browser_download_url,apiUrl:assetEndpoint(repository,asset)};
+      if(!installerIdentity(repository,release.tag_name,version,installer)||installer.size!==asset.size||asset.digest&&asset.digest!==`sha256:${installer.sha256}`)throw failure();
+    }
     return {tag_name:release.tag_name,version,commit:manifest.commit,upstreamCommit:manifest.upstreamCommit,html_url:release.html_url,releaseId:release.id,
-      archiveUrl,archiveSha256:manifest.archive.sha256,archiveSize:manifest.archive.size,sourceRepository:repository,manifest};
+      archiveUrl,archiveApiUrl,archiveSha256:manifest.archive.sha256,archiveSize:manifest.archive.size,sourceRepository:repository,manifest,installer};
   }catch{throw failure();}
+}
+
+export async function stageForkInstaller({root,release,fetchImpl=fetch}={}){
+  const repository=release?.sourceRepository,match=tagPattern.exec(release?.tag_name??''),installer=release?.installer;
+  if(!isAbsolute(root??'')||repository!==FORK_REPOSITORY||!match||match.slice(1,4).join('.')!==release.version||!installerIdentity(repository,release.tag_name,release.version,installer))throw failure();
+  root=realpathSync(resolve(root));
+  const folder=checkedPath(root,join(root,'installer-updates',release.tag_name));mkdirSync(folder,{recursive:true,mode:0o700});
+  const file=checkedPath(root,join(folder,installer.name));
+  if(existsSync(file)&&lstatSync(file).isFile()&&lstatSync(file).size===installer.size&&hash(readFileSync(file))===installer.sha256)return file;
+  const bytes=await fetchBytes(fetchImpl,installer.apiUrl??installer.downloadUrl,installer.size,180000);
+  if(bytes.length!==installer.size||bytes[0]!==77||bytes[1]!==90||hash(bytes)!==installer.sha256)throw failure();
+  const temp=checkedPath(root,file+'.'+randomUUID()+'.tmp');writeFileSync(temp,bytes,{flag:'wx',mode:0o600});renameSync(temp,file);return file;
 }
 
 // All entries are checked before the first file is written. The child uses isolated, bundled Python and no shell.
@@ -177,7 +213,8 @@ export async function stageForkRelease({root,release,pythonExe,log=()=>{},fetchI
   if(!repositoryName(repository)||version!==release.version||!Number.isSafeInteger(release.releaseId)||release.releaseId<=0)throw failure();
   checkedManifest(release.manifest,{repository,version});
   if(release.commit!==release.manifest.commit||release.upstreamCommit!==release.manifest.upstreamCommit||release.archiveSha256!==release.manifest.archive.sha256
-    ||release.archiveSize!==release.manifest.archive.size||!assetUrl(repository,release.tag_name,ARCHIVE,release.archiveUrl))throw failure();
+    ||release.archiveSize!==release.manifest.archive.size||!assetUrl(repository,release.tag_name,ARCHIVE,release.archiveUrl)
+    ||release.archiveApiUrl&&!assetApiUrl(repository,release.archiveApiUrl))throw failure();
   const versions=checkedPath(root,join(root,'host-versions'));mkdirSync(versions,{recursive:true});
   let sourceRoot=checkedPath(versions,join(versions,`${version}-fork-${release.releaseId}`));
   const result=reused=>({sourceRoot,hostRoot:join(sourceRoot,'apps/host'),version,commit:release.commit,releaseId:release.releaseId,
@@ -196,7 +233,7 @@ export async function stageForkRelease({root,release,pythonExe,log=()=>{},fetchI
   if(!existsSync(archive)||lstatSync(archive).size!==release.archiveSize||hash(readFileSync(archive))!==release.archiveSha256){
     if(existsSync(archive))archive=checkedPath(downloads,join(downloads,release.archiveSha256+'-'+randomUUID().slice(0,8)+'.zip'));
     log(`検証済みのモデル切替版 ${version} をダウンロードしています。`);
-    const bytes=await fetchBytes(fetchImpl,release.archiveUrl,release.archiveSize,120000);
+    const bytes=await fetchBytes(fetchImpl,release.archiveApiUrl??release.archiveUrl,release.archiveSize,120000);
     if(bytes.length!==release.archiveSize||hash(bytes)!==release.archiveSha256)throw failure();
     writeFileSync(archive,bytes,{flag:'wx',mode:0o600});
   }

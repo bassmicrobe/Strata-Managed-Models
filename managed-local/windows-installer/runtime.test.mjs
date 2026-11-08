@@ -62,6 +62,20 @@ test('the real bundled-Node smoke starts an empty isolated host, records success
   const result=await main(['--smoke'],{appRoot:f.appRoot,dataRoot:f.dataRoot});assert.equal(result.ok,true);assert.equal(result.controlAvailable,true);assert.equal(result.models,0);assert.equal(result.providers,0);assert.deepEqual(read(join(f.dataRoot,'smoke-result.json')),result);assert(!existsSync(f.paths.pidFile));
   const env=read(join(f.dataRoot,'environment.json'));assert.equal(env.STRATA_CONTROL_DIR,f.paths.control);assert.equal(env.STRATA_NO_ACQUIRE,'1');assert.equal(env.STRATA_MANAGED_MODELS_CONFIG,undefined);
 });
+test('desktop launch returns a ready local window URL without starting a browser', {skip:process.platform!=='win32',timeout:90000},async()=>{
+  const f=fixture();prepareNode(f);fakeHost(f);let browserCalls=0;
+  const options={appRoot:f.appRoot,dataRoot:f.dataRoot,openBrowser:async()=>{browserCalls++;}};
+  try{
+    const first=await main(['--desktop','--no-update'],options);const url=new URL(first.localUrl);
+    assert.equal(url.hostname,'127.0.0.1');assert.equal(url.hash,'#/models');assert.equal(first.tailscaleUrl,null);
+    const page=await fetch(url.origin,{signal:AbortSignal.timeout(5000)});assert(page.ok);assert((await page.text()).includes('id="root"'));
+    const api=await main(['--desktop','--api','--no-update'],options);assert.equal(api.pid,first.pid);assert.equal(new URL(api.localUrl).hash,'#/settings?section=Models');assert.equal(browserCalls,0);
+    const latest={...f.active,releaseId:99,tag_name:'managed-v0.2.12-5',installer:{name:'fixture-setup.exe'}};
+    writeFileSync(f.paths.activeFile,JSON.stringify({...f.active,releaseId:99,releaseTag:latest.tag_name}));
+    const notice=await main(['--desktop'],{...options,fetchRelease:async()=>latest});
+    assert.equal(notice.pid,first.pid);assert.equal(notice.updateStatus,'current');assert.equal(notice.installedReleaseTag,'managed-v0.2.12-4');assert.equal(notice.latestInstallerTag,latest.tag_name);assert.equal(browserCalls,0);
+  }finally{await stopHost(f.paths);}
+});
 test('the real owned-host shutdown refuses a remote stream, then unloads and stops only that host', {skip:process.platform!=='win32',timeout:90000},async()=>{
   const f=fixture();prepareNode(f);fakeHost(f,{busy:true,instance:true});const chosen=await port(),entry=join(f.paths.host,'server/index.mjs');
   const child=spawn(f.paths.node,[entry],{windowsHide:true,stdio:'ignore',env:hostEnvironment(f.paths,f.active,chosen)});

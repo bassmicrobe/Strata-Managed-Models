@@ -18,6 +18,10 @@ SetCompressor /SOLID lzma
 !ifndef PAYLOAD
   !error "PAYLOAD must be defined by build-installer.mjs"
 !endif
+!ifndef WEBVIEW2_SETUP
+  !error "WEBVIEW2_SETUP must be defined by build-installer.mjs"
+!endif
+!define WEBVIEW2_REG "Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
 !define PRODUCT "Strata Managed Models"
 !define UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\StrataManagedModels"
 !define OWNER_MARKER "StrataManagedModels:5B157B33-47AD-43CC-8E0F-42F5F91D8290"
@@ -202,9 +206,35 @@ Function CheckInstallTarget
   targetOK:
 FunctionEnd
 
+Function ReadWebView2Version
+  SetRegView 32
+  ReadRegStr $0 HKLM "${WEBVIEW2_REG}" "pv"
+  ${If} $0 == ""
+  ${OrIf} $0 == "0.0.0.0"
+    ReadRegStr $0 HKCU "${WEBVIEW2_REG}" "pv"
+  ${EndIf}
+  SetRegView 64
+FunctionEnd
+
+Function EnsureWebView2
+  Call ReadWebView2Version
+  ${If} $0 == ""
+  ${OrIf} $0 == "0.0.0.0"
+    InitPluginsDir
+    File /oname=$PLUGINSDIR\MicrosoftEdgeWebview2Setup.exe "${WEBVIEW2_SETUP}"
+    ExecWait '"$PLUGINSDIR\MicrosoftEdgeWebview2Setup.exe" /silent /install' $1
+    Call ReadWebView2Version
+    ${If} $0 == ""
+    ${OrIf} $0 == "0.0.0.0"
+      !insertmacro Fail "Microsoft Edge WebView2 Runtime is required. Connect to the internet, install the Microsoft WebView2 Runtime, then run this installer again."
+    ${EndIf}
+  ${EndIf}
+FunctionEnd
+
 Section "Strata Managed Models" SEC_APP
   SectionIn RO
   Call CheckInstallTarget
+  Call EnsureWebView2
   SetOutPath "$INSTDIR"
   File /r "${PAYLOAD}\*"
   WriteUninstaller "$INSTDIR\Uninstall.exe"
@@ -214,6 +244,7 @@ Section "Strata Managed Models" SEC_APP
   CreateShortcut "$SMPROGRAMS\${PRODUCT}\API connections.lnk" "$INSTDIR\StrataManaged.exe" "--api"
   CreateShortcut "$SMPROGRAMS\${PRODUCT}\Tailscaleで共有.lnk" "$INSTDIR\StrataManaged.exe" "--tailscale"
   CreateShortcut "$SMPROGRAMS\${PRODUCT}\Tailscale共有を停止.lnk" "$INSTDIR\StrataManaged.exe" "--tailscale-off"
+  CreateShortcut "$SMPROGRAMS\${PRODUCT}\Strataを停止.lnk" "$INSTDIR\StrataManaged.exe" "--quit"
   CreateShortcut "$SMPROGRAMS\${PRODUCT}\Readme (Japanese).lnk" "$SYSDIR\notepad.exe" '"$INSTDIR\README.ja.txt"'
   WriteRegStr HKCU "${UNINST_KEY}" "DisplayName" "${PRODUCT}"
   WriteRegStr HKCU "${UNINST_KEY}" "DisplayVersion" "${VERSION}"
@@ -271,6 +302,7 @@ Section "Uninstall"
     Delete "$SMPROGRAMS\${PRODUCT}\API connections.lnk"
     Delete "$SMPROGRAMS\${PRODUCT}\Tailscaleで共有.lnk"
     Delete "$SMPROGRAMS\${PRODUCT}\Tailscale共有を停止.lnk"
+    Delete "$SMPROGRAMS\${PRODUCT}\Strataを停止.lnk"
     Delete "$SMPROGRAMS\${PRODUCT}\Readme (Japanese).lnk"
     RMDir "$SMPROGRAMS\${PRODUCT}"
     ; Only these installer-owned application folders are removed. User profiles/models are elsewhere.

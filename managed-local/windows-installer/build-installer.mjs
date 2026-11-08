@@ -17,9 +17,9 @@ const MAX_ARCHIVE=256*1024*1024;
 const sha=bytes=>createHash('sha256').update(bytes).digest('hex');
 export function contained(base,file){const r=relative(resolve(base),resolve(file));return !!r&&r!=='..'&&!r.startsWith('..'+sep)&&!isAbsolute(r);}
 export function hostFileAllowed(path){return typeof path==='string'&&!isAbsolute(path)&&!path.includes(':')&&!path.includes('\\')&&!path.split('/').some(p=>!p||p==='.'||p==='..'||p.startsWith('.env')||p.startsWith('.npmrc')||['node_modules','.git','.vite','.cache'].includes(p));}
-export function runBuildCommand(file,args,{cwd,timeoutMs=300000}={}){
+export function runBuildCommand(file,args,{cwd,env,timeoutMs=300000}={}){
   return new Promise((ok,bad)=>{
-    const child=execFile(file,args,{cwd,timeout:timeoutMs,windowsHide:true,maxBuffer:8*1024*1024},(err,stdout,stderr)=>{
+    const child=execFile(file,args,{cwd,env,timeout:timeoutMs,windowsHide:true,maxBuffer:8*1024*1024},(err,stdout,stderr)=>{
       if(err)bad(Object.assign(new Error('The Windows installer build command failed.'),{detail:String(stdout).slice(-12000)+String(stderr).slice(-12000)}));
       else ok({code:0,stdout:String(stdout),stderr:String(stderr)});
     });child.stdin?.end();
@@ -152,6 +152,50 @@ function payloadSize(folder){let n=0;for(const f of readdirSync(folder)){const p
 function findControl(unpacked){if(existsSync(join(unpacked,'strata.py')))return unpacked;const children=readdirSync(unpacked).filter(n=>lstatSync(join(unpacked,n)).isDirectory());if(children.length===1&&existsSync(join(unpacked,children[0],'strata.py')))return join(unpacked,children[0]);throw Error('The official Control archive layout was not recognized.');}
 function makensis(){const candidates=[process.env.STRATA_MAKENSIS,join(process.env['ProgramFiles(x86)']||'C:/Program Files (x86)','NSIS/makensis.exe'),join(process.env.ProgramFiles||'C:/Program Files','NSIS/makensis.exe')];const value=candidates.find(p=>p&&existsSync(p));if(!value)throw Error('NSIS is not installed. Set STRATA_MAKENSIS to an official makensis.exe.');return value;}
 
+const DESKTOP_TARGET='x86_64-pc-windows-msvc';
+const WEBVIEW2_URL='https://go.microsoft.com/fwlink/p/?LinkId=2124703';
+async function webviewBootstrapper(cache,work,run,fetchImpl){
+  const file=join(cache,'MicrosoftEdgeWebview2Setup.exe');
+  if(!existsSync(file)){
+    const response=await fetchImpl(WEBVIEW2_URL,{signal:AbortSignal.timeout(60000)});
+    if(!response.ok)throw Error(`Microsoft WebView2 bootstrapper download failed (HTTP ${response.status}).`);
+    const bytes=Buffer.from(await response.arrayBuffer());if(bytes.length<1024||bytes.length>8*1024*1024||bytes[0]!==77||bytes[1]!==90)throw Error('The WebView2 bootstrapper is not a Windows executable.');
+    writeFileSync(file,bytes);
+  }
+  const script=join(work,'verify-webview2.ps1');
+  writeFileSync(script,String.raw`param([string]$File)
+$ErrorActionPreference = 'Stop'
+$signature = Get-AuthenticodeSignature -LiteralPath $File
+if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.GetNameInfo([Security.Cryptography.X509Certificates.X509NameType]::SimpleName,$false) -ne 'Microsoft Corporation') { throw 'The WebView2 bootstrapper is not signed by Microsoft.' }
+`);
+  await invoke(run,'pwsh.exe',['-NoLogo','-NoProfile','-NonInteractive','-File',script,file],{cwd:work,timeoutMs:60000});
+  return file;
+}
+
+async function buildDesktopWindow(repoRoot,stageBase,payload,run){
+  const root=join(repoRoot,'managed-local/windows-installer/desktop'),manifest=join(root,'Cargo.toml');
+  const cargo=process.env.STRATA_CARGO_EXE??'cargo.exe',target=resolve(process.env.CARGO_TARGET_DIR??join(stageBase,'smm-desktop-target'));
+  const registry=process.env.CARGO_HOME??join(process.env.USERPROFILE??stageBase,'.cargo');
+  const env={...process.env,CARGO_TARGET_DIR:target,CARGO_BUILD_JOBS:process.env.CARGO_BUILD_JOBS??'8',CARGO_ENCODED_RUSTFLAGS:[`--remap-path-prefix=${repoRoot}=/strata`,`--remap-path-prefix=${registry}=/cargo`].join('\x1f')};
+  delete env.RUSTFLAGS;
+  const options={cwd:root,env,timeoutMs:1200000},base=['--locked','--release','--target',DESKTOP_TARGET,'--manifest-path',manifest];
+  console.log('Building and testing the Rust desktop window.');
+  await invoke(run,cargo,['test',...base],options);
+  await invoke(run,cargo,['build',...base],options);
+  const native=join(payload,'resources/desktop');mkdirSync(native,{recursive:true});
+  copyFileSync(join(target,DESKTOP_TARGET,'release/StrataWindow.exe'),join(native,'StrataWindow.exe'));
+  const metadata=JSON.parse((await invoke(run,cargo,['metadata','--locked','--format-version','1','--filter-platform',DESKTOP_TARGET,'--manifest-path',manifest],options)).stdout);
+  const included=new Set(metadata.resolve.nodes.map(n=>n.id)),licenses=join(payload,'licenses/desktop');mkdirSync(licenses,{recursive:true});
+  const notices=['# Rust desktop window dependencies',''];
+  for(const pkg of metadata.packages.filter(p=>included.has(p.id)&&p.source)){
+    const source=dirname(pkg.manifest_path),label=(pkg.name+'-'+pkg.version).replace(/[^A-Za-z0-9_.-]/g,'_');
+    const names=readdirSync(source).filter(name=>/^(?:licen[cs]e|copying|notice|copyright)(?:[._-].*)?$/i.test(name)&&lstatSync(join(source,name)).isFile());
+    for(const name of names){const out=join(licenses,label);mkdirSync(out,{recursive:true});copyFileSync(join(source,name),join(out,name));}
+    notices.push(`- ${pkg.name} ${pkg.version}: ${pkg.license??'see included license'}${names.length?' ('+names.map(n=>label+'/'+n).join(', ')+')':''}`);
+  }
+  writeFileSync(join(licenses,'THIRD-PARTY-NOTICES.md'),notices.join('\n')+'\n');
+}
+
 export async function buildWindowsInstaller({repoRoot,hostSourceRoot=repoRoot,version,commit,releaseTag,outputDir,run=runBuildCommand,fetchImpl=fetch,control}={}){
   if(process.platform!=='win32')throw Error('Build this installer on Windows.');
   if(!/^\d+\.\d+\.\d+$/.test(version??'')||!/^[a-f0-9]{40}$/.test(commit??'')||!/^managed-v\d+\.\d+\.\d+-\d+$/.test(releaseTag??'')||!isAbsolute(repoRoot??'')||!isAbsolute(outputDir??''))throw Error('Invalid Windows installer build identity.');
@@ -171,15 +215,17 @@ export async function buildWindowsInstaller({repoRoot,hostSourceRoot=repoRoot,ve
   const runtimeSource=join(repoRoot,'managed-local/windows-installer/runtime');if(!existsSync(join(runtimeSource,'Launcher.cs'))||!existsSync(join(runtimeSource,'runtime.mjs')))throw Error('Portable launcher runtime sources are missing.');
   cpSync(runtimeSource,join(payload,'runtime'),{recursive:true,filter:file=>!file.endsWith('Launcher.cs')});
   const licenses=collectLicenses(repoRoot,join(payload,'licenses'));
+  await buildDesktopWindow(repoRoot,stageBase,payload,run);
+  const webview2=await webviewBootstrapper(cache,work,run,fetchImpl);
   const readme=join(repoRoot,'managed-local/windows-installer/README.ja.md');if(!existsSync(readme))throw Error('The Japanese installer README is missing.');
   copyFileSync(readme,join(payload,'README.ja.md'));writeFileSync(join(payload,'README.ja.txt'),'\uFEFF'+readFileSync(readme,'utf8').replace(/^\uFEFF/,''));
   const icon=join(repoRoot,'apps/desktop/src-tauri/icons/icon.ico');
   const csc=join(process.env.WINDIR||'C:/Windows','Microsoft.NET/Framework64/v4.0.30319/csc.exe');if(!existsSync(csc))throw Error('The Windows .NET Framework C# compiler is unavailable.');
-  await invoke(run,csc,['/nologo','/codepage:65001','/target:winexe','/optimize+','/platform:x64','/reference:System.Windows.Forms.dll','/reference:System.Drawing.dll',...(existsSync(icon)?['/win32icon:'+icon]:[]),'/out:'+join(payload,'StrataManaged.exe'),join(runtimeSource,'Launcher.cs')],{cwd:work});
+  await invoke(run,csc,['/nologo','/codepage:65001','/target:winexe','/optimize+','/platform:x64','/reference:System.Windows.Forms.dll','/reference:System.Drawing.dll','/reference:System.Web.Extensions.dll',...(existsSync(icon)?['/win32icon:'+icon]:[]),'/out:'+join(payload,'StrataManaged.exe'),join(runtimeSource,'Launcher.cs')],{cwd:work});
   const metadata={schema_version:1,product:PRODUCT,version,commit,releaseTag,nodeVersion:NODE_VERSION,controlVersion:control.version};writeFileSync(join(payload,'managed-install.json'),JSON.stringify(metadata,null,2));
   writeFileSync(join(payload,'.strata-managed-install'),'StrataManagedModels:5B157B33-47AD-43CC-8E0F-42F5F91D8290');
   const installer=join(outputDir,`Strata-Managed-Models-${version}-windows-x64-setup.exe`),template=join(HERE,'installer.nsi');
-  await invoke(run,compiler,['/V3','/DVERSION='+version,'/DOUTFILE='+installer,'/DPAYLOAD='+payload,'/DESTIMATED_SIZE='+Math.ceil(payloadSize(payload)/1024),...(existsSync(icon)?['/DPRODUCT_ICON='+icon]:[]),template],{cwd:work,timeoutMs:600000});
+  await invoke(run,compiler,['/INPUTCHARSET','UTF8','/V3','/DVERSION='+version,'/DOUTFILE='+installer,'/DPAYLOAD='+payload,'/DWEBVIEW2_SETUP='+webview2,'/DESTIMATED_SIZE='+Math.ceil(payloadSize(payload)/1024),...(existsSync(icon)?['/DPRODUCT_ICON='+icon]:[]),template],{cwd:work,timeoutMs:600000});
   if(!existsSync(installer))throw Error('NSIS did not produce the installer.');
   const bytes=readFileSync(installer),result={installer,sha256:sha(bytes),size:bytes.length,version,commit,releaseTag,payload,host,licenses,node:{version:NODE_VERSION,archiveSha256:NODE_SHA256},control:{version:control.version,archiveSha256:control.sha256}};
   writeFileSync(join(outputDir,'installer-build.json'),JSON.stringify(result,null,2));return result;

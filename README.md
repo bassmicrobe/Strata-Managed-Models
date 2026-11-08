@@ -1,10 +1,10 @@
-> **Managed models & Tailscale fork**: switch added local/API models, share the UI privately over Tailscale HTTPS, and install with the Windows setup. Stable upstream releases are merged, tested and packaged automatically. [日本語README・Windowsの導入方法](README.ja.md) · [Tailscale経由の使い方](README.ja.md#tailscale) · [Original Strata](https://github.com/Niko1221/Strata)
+> **Managed models & Tailscale fork**: use Strata in its own Windows window, switch added local/API models, and share the UI privately over Tailscale HTTPS. The Windows app alerts you when a verified installer update is available. [日本語README・Windowsの導入方法](README.ja.md) · [Tailscale経由の使い方](README.ja.md#tailscale) · [Original Strata](https://github.com/Niko1221/Strata)
 
 ### Tailscaleで別のPC・スマートフォンから使う
 
 1. **モデルを実行するPC**にこのforkの[Windows用インストーラー](https://github.com/bassmicrobe/Strata-Managed-Models/releases/latest)を導入し、使うモデルを追加します。
 2. 実行PCと接続側の両方でTailscaleにログインし、同じTailnetへ接続します。実行PCのスタートメニューで **Strata Managed Models → Tailscaleで共有** を選びます。初回にHTTPS／Serveの有効化が必要な場合は案内を完了し、もう一度共有を実行します。
-3. 開いた **`https://…ts.net/` のURL**を接続側のブラウザーで開きます。表示されたポート番号も含めて使います。接続側にStrataやモデル本体は不要です。
+3. 専用ウィンドウの **Strata → 共有URLをコピー** で接続先をコピーし、別端末のブラウザーで開きます。表示されたポート番号も含めて使います。接続側にStrataやモデル本体は不要です。
 
 実行PCとStrataは起動したまま使います。停止は **Tailscale共有を停止** です。共有先は同じ会話履歴・モデル・操作画面を使うため、アクセスできる端末や利用者はTailscale側で管理してください。通常のインターネットへ公開するFunnelは使いません。
 

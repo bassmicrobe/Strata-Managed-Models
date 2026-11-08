@@ -28,6 +28,8 @@ jobs:
   update-and-release:
     runs-on: windows-latest
     timeout-minutes: 45
+    env:
+      RUSTUP_TOOLCHAIN: '1.99.1'
     steps:
       - uses: actions/checkout@v4
         with:
@@ -45,6 +47,11 @@ jobs:
             choco install nsis --yes --no-progress
             if ($LASTEXITCODE -ne 0) { throw 'NSIS could not be installed.' }
           }
+      - name: Prepare Rust for the desktop window
+        shell: pwsh
+        run: |
+          rustup toolchain install 1.99.1 --profile minimal --no-self-update
+          if ($LASTEXITCODE -ne 0) { throw 'The desktop Rust toolchain could not be installed.' }
       - name: Merge, verify, and publish
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -61,4 +68,5 @@ jobs:
             ${{ runner.temp }}/strata-managed-*/windows-installer/*setup.exe
             ${{ runner.temp }}/strata-managed-*/installer-test/install.log
             ${{ runner.temp }}/strata-managed-*/installer-test/user-data*/smoke-result.json
+            ${{ runner.temp }}/strata-managed-*/installer-test/user-data*/desktop-smoke.json
             ${{ runner.temp }}/strata-managed-*/installer-test/user-data*/logs/*.log
