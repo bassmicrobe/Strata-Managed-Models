@@ -21,7 +21,7 @@ SetCompressor /SOLID lzma
 !define PRODUCT "Strata Managed Models"
 !define UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\StrataManagedModels"
 !define OWNER_MARKER "StrataManagedModels:5B157B33-47AD-43CC-8E0F-42F5F91D8290"
-!macro Fail Message
+!macro InstallLog Message
   ReadEnvStr $R8 STRATA_MANAGED_INSTALL_LOG
   ${If} $R8 != ""
     ClearErrors
@@ -31,6 +31,9 @@ SetCompressor /SOLID lzma
       FileClose $R9
     ${EndIf}
   ${EndIf}
+!macroend
+!macro Fail Message
+  !insertmacro InstallLog "${Message}"
   MessageBox MB_OK|MB_ICONSTOP "${Message}" /SD IDOK
   SetErrorLevel 1
   Abort
@@ -124,7 +127,19 @@ FunctionEnd
 !insertmacro SafeTree "un."
 
 Function CheckInstallTarget
-  GetFullPathName $INSTDIR "$INSTDIR"
+  !insertmacro InstallLog "Install target input: $INSTDIR"
+  StrCpy $0 "$INSTDIR"
+  ${If} $0 == ""
+    !insertmacro Fail "Choose a dedicated application folder."
+  ${EndIf}
+  ; Unlike NSIS GetFullPathName, this Win32 call does not require existing parent directories.
+  System::Call 'kernel32::GetFullPathNameW(w r0, i ${NSIS_MAX_STRLEN}, w .r1, p 0) i .r2'
+  !insertmacro InstallLog "Install target normalized: $1 (length $2)"
+  ${If} $2 == 0
+  ${OrIf} $2 >= ${NSIS_MAX_STRLEN}
+    !insertmacro Fail "The application folder could not be normalized."
+  ${EndIf}
+  StrCpy $INSTDIR "$1"
   ReadRegStr $0 HKCU "${UNINST_KEY}" "InstallLocation"
   ${If} $0 != ""
     GetFullPathName $0 "$0"
