@@ -1,6 +1,7 @@
 import { tr } from '../lib/i18n';
 /** App shell: routes, setup takeover, palette, toasts. */
 import { useNative } from '../lib/native';
+import { managedModelPhase, useManagedModels } from '../lib/managed-models';
 import { Component, useEffect, useRef, useState, type ReactNode } from 'react';
 import { useSurfaceFocus } from '../lib/focus';
 import { closeSettings, useLocation } from '../lib/router';
@@ -115,18 +116,21 @@ function FocusBar() {
     // Alt is spelled out, because ⌘ and ⌥ are not on that keyboard.
     const mac = MOD === '⌘';
     const native = useNative(), nativeCurrent = native?.instances.find(i => i.id === native.defaultId);
+    const managed = useManagedModels();
+    const managedActive = managed?.enabled ? managed.models.find(item => item.id === managed.activeId) : undefined;
     const library = useStore((s) => s.library);
     const monitor = useStore((s) => s.monitor);
     const model = library?.variants.find((v) => v.id === library.loaded) ?? null;
-    const phase = nativeCurrent ? (nativeCurrent.status === 'ready' ? nativeCurrent.phase : nativeCurrent.status) : monitor?.phase ?? 'idle';
-    const state = ['error', 'unavailable'].includes(phase) ? 'idle' : phase === 'generating' || phase === 'reading' || phase === 'thinking' ? 'busy' : model || nativeCurrent ? 'ready' : 'idle';
+    const phase = managed?.enabled ? managed.switching ? 'loading' : managed.connectionError ? 'unavailable' : managed.error ? 'error' : managed.activeRequests > 0 ? 'generating' : managedActive ? 'ready' : 'idle' : nativeCurrent ? (nativeCurrent.status === 'ready' ? nativeCurrent.phase : nativeCurrent.status) : monitor?.phase ?? 'idle';
+    const modelReady = managed?.enabled ? !!managedActive : !!(model || nativeCurrent);
+    const state = ['error', 'unavailable'].includes(phase) ? 'idle' : phase === 'generating' || phase === 'reading' || phase === 'thinking' || managed?.enabled && managed.switching ? 'busy' : modelReady ? 'ready' : 'idle';
     return (<div className="focusbar" data-state={state}>
       <span className="focusbar__dot"/>
       <span className="strong" style={{ color: 'var(--st-ink)' }}>
-        {tr(nativeCurrent?.label ?? model?.label ?? 'No model loaded')}
+        {tr(managed?.enabled ? managedActive?.label ?? 'モデル未読込' : nativeCurrent?.label ?? model?.label ?? 'No model loaded')}
       </span>
       <span>
-        {tr(phase === 'reading'
+        {tr(managed?.enabled ? managed.switching ? managedModelPhase(managed.phase) : phase === 'generating' ? '回答を生成中' : phase === 'unavailable' ? '接続を確認しています' : phase === 'error' ? '読込エラー' : managedActive ? '読込済み · 32K' : '未読込' : phase === 'reading'
             ? 'reading prompt'
             : phase === 'generating'
                 ? `generating · ${(nativeCurrent ? nativeCurrent.metrics?.live?.tok_s ?? 0 : monitor?.outputTps ?? 0).toFixed(1)} tok/s`

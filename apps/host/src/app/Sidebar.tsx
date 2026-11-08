@@ -1,6 +1,7 @@
 import {sessionTitle} from '../lib/session-title';
 import { tr } from '../lib/i18n';
 import { useNative } from '../lib/native';
+import { managedModelPhase, useManagedModels } from '../lib/managed-models';
 import { modelFamilyIcon } from '../lib/model-icons';
 import { TaskTree } from './TaskTree';
 /** Quiet navigation, with the same destinations at every window size. */
@@ -62,13 +63,16 @@ export function Sidebar({ containerRef }: {
     const menuTrigger = useRef<HTMLElement | null>(null);
     const current = library?.variants.find(v => v.id === library.loaded);
     const native = useNative(), nativeCurrent = native?.instances.find(i => i.id === native.defaultId);
-    const modelName = nativeCurrent?.label ?? (current?.local ? current.name : current?.family) ?? tr('No model loaded');
+    const managed = useManagedModels();
+    const managedActive = managed?.enabled ? managed.models.find(model => model.id === managed.activeId) : undefined;
+    const modelName = managed?.enabled ? managedActive?.label ?? 'モデル未読込' : nativeCurrent?.label ?? (current?.local ? current.name : current?.family) ?? tr('No model loaded');
     // The version from the catalog and the card it runs on ("Q2_0 · GPU 2"), not the file id.
     const nativeSize = nativeCurrent ? native?.catalog?.families.flatMap(f => f.sizes).find(s => s.id === nativeCurrent.model) : undefined;
     const nativeSecond = nativeCurrent ? [nativeSize?.model ?? nativeCurrent.model.toUpperCase(), nativeCurrent.gpus.length ? nativeCurrent.gpus.map(g => `GPU ${g + 1}`).join(' + ') : ''].filter(Boolean).join(' · ') : null;
-    const modelQuant = nativeSecond ?? current?.quant ?? tr('View model versions');
-    const phase = nativeCurrent ? (nativeCurrent.status === 'ready' ? nativeCurrent.phase : nativeCurrent.status) : monitor?.phase ?? 'idle';
-    const status = phase === 'unavailable' ? 'Status unavailable' : phase === 'error' ? 'Error' : phase === 'loading' ? 'Loading' : !current && !nativeCurrent ? 'No model loaded' : phase === 'reading' ? 'Reading prompt' : phase === 'thinking' ? 'Thinking' : phase === 'generating' ? 'Generating' : 'Ready';
+    const modelQuant = managed?.enabled ? `32K · ${managed.switching ? managedModelPhase(managed.phase) : managedActive ? '読込済み' : '未読込'}` : nativeSecond ?? current?.quant ?? tr('View model versions');
+    const phase = managed?.enabled ? managed.switching ? 'loading' : managed.connectionError ? 'unavailable' : managed.error ? 'error' : managed.activeRequests > 0 ? 'generating' : managedActive ? 'ready' : 'idle' : nativeCurrent ? (nativeCurrent.status === 'ready' ? nativeCurrent.phase : nativeCurrent.status) : monitor?.phase ?? 'idle';
+    const missingModel = managed?.enabled ? !managedActive : !current && !nativeCurrent;
+    const status = phase === 'unavailable' ? 'Status unavailable' : phase === 'error' ? 'Error' : phase === 'loading' ? 'Loading' : missingModel ? 'No model loaded' : phase === 'reading' ? 'Reading prompt' : phase === 'thinking' ? 'Thinking' : phase === 'generating' ? 'Generating' : 'Ready';
     // The model is busy with a chat that is not the one in front of the person: the chip says which one (a title, or how many).
     const awayChats = [...working].filter(id => !(location.route === 'chat' && id === activeSession));
     const awayTitle = awayChats.length === 1 ? sessions.find(s => s.id === awayChats[0]) : undefined;

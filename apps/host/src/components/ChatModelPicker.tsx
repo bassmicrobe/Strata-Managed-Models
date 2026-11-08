@@ -10,9 +10,13 @@ import type { ModelVariant } from '../lib/types';
 import { sizeGb } from '../lib/format';
 import { contextTokens } from '../lib/experience';
 import { nativeAction, useNative } from '../lib/native';
+import { useManagedModels } from '../lib/managed-models';
+import { ManagedChatModelPicker } from './ManagedChatModelPicker';
 /** The loaded model is shared by all chats; switching uses the existing lifecycle gates. */
 export function ChatModelPicker() {
     const native = useNative(), remote = useStore(s => s.remoteModel);
+    const managed = useManagedModels();
+    if (managed?.enabled) return <ManagedChatModelPicker state={managed}/>;
     return native?.instances.length && !remote ? <NativeChatModelPicker /> : <LegacyChatModelPicker />;
 }
 function NativeChatModelPicker() {

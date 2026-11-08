@@ -1,0 +1,5 @@
+.menu__item.managed-model-option > span:first-child { white-space: normal; overflow-wrap: anywhere; }
+.managed-model-option strong { display: block; }
+.managed-model-option .model-picker-state { align-self: center; }
+.managed-model-loading { display: grid; gap: 12px; }
+.managed-model-loading p { margin: 0; }

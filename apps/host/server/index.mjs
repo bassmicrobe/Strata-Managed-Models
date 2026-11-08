@@ -86,6 +86,7 @@ import { apiPath } from './api-paths.mjs';
 import { findFreePort, listenProblem } from './ports.mjs';
 import { validateChatImages } from './chat-images.mjs';
 import { createTimeSkip, measureFolder, timeskipRevisionMessage, imageTypeOf } from './timeskip.mjs';
+import { createManagedLocalModels } from './managed-local-models.mjs';
 
 const HERE = fileURLToPath(new URL('.', import.meta.url));
 const ROOT = resolve(HERE, '..');
@@ -186,6 +187,17 @@ function withPictureAnswers(list) {
     return { ...m, reads: readsPicturesByDefault(m, asked), thinks: m.reasoning ?? visionProbe.knownThinks(c, m.id) ?? null };
   }) }));
   return { ...list, connections };
+}
+// This machine's opt-in lifecycle gateway keeps the existing provider ID so saved chats still resolve.
+const managedModels = createManagedLocalModels({ changed: value => hub.send('managed-models', value), log: line => console.log(line) });
+if (managedModels.enabled) {
+  const baseUrl = `http://127.0.0.1:${PORT}/api/managed-models/v1`;
+  const registration = managedModels.providerRegistration(baseUrl);
+  const config = JSON.parse(readFileSync(process.env.STRATA_MANAGED_MODELS_CONFIG, 'utf8').replace(/^\uFEFF/, ''));
+  const existing = modelProviders.list().connections.find(c => c.id === config.connectionId)
+    ?? modelProviders.list().connections.find(c => c.baseUrl === baseUrl);
+  const saved = modelProviders.save({ ...registration, ...(existing ? { id: existing.id } : {}) });
+  managedModels.setConnectionId(saved.connections.find(c => c.baseUrl === baseUrl).id);
 }
 /** Why a picture cannot go to this API model, in plain words and with the way to fix it; null when it can. */
 async function pictureRefusal(connection, model) {
@@ -999,6 +1011,24 @@ const server = http.createServer(async (req, res) => {
 });
 
 async function api(req, res, path, method, url) {
+  if (path.startsWith('/api/managed-models') && method === 'POST' && storageChanging) return error(res, 409, 'Wait for the model folder check to finish.');
+  if (path.startsWith('/api/managed-models/v1/')) {
+    return managedModels.proxy(req, res, path.slice('/api/managed-models/v1/'.length));
+  }
+  if (path === '/api/managed-models' && method === 'GET') return json(res, 200, await managedModels.publicState());
+  if (path === '/api/managed-models/switch' && method === 'POST') {
+    let allowed = typeof req.headers['x-strata-client'] === 'string' && !!req.headers['x-strata-client'].trim();
+    if (req.headers.origin) {
+      try {
+        const origin = new URL(req.headers.origin);
+        allowed &&= origin.protocol === 'http:' && ['127.0.0.1', 'localhost', '[::1]'].includes(origin.hostname)
+          && origin.host === req.headers.host && Number(origin.port || 80) === PORT;
+      } catch { allowed = false; }
+    }
+    if (!allowed) return error(res, 403, 'Not allowed.');
+    try { const body = await readBody(req, 4096); return json(res, 202, managedModels.requestSwitch(body?.id)); }
+    catch (err) { return error(res, err.statusCode ?? 400, err.message); }
+  }
   if(path==='/api/fonts'&&method==='GET')return json(res,200,await systemFonts());
   // --- chats: one file each in the data folder -----------------------------
   // Not held back by a model folder move: saving a chat has nothing to do with the models. A page must name itself (x-strata-client), which
@@ -1488,7 +1518,8 @@ async function api(req, res, path, method, url) {
     catch (err) { return error(res, 400, err.message); }
     const changed = directory !== store.MODELS_DIR;
     const instances = runtimeState().instances;
-    if (storageChanging || modelOperations || models.directoryBusy() || imageModels.busy()||native.state().jobs.some(j=>j.state==='running')) return error(res, 409, 'Finish or cancel model downloads and loading before changing the folder.');
+    const managedState = await managedModels.publicState({ refresh: false });
+    if (storageChanging || modelOperations || managedState.switching || managedState.activeRequests || managedState.queuedRequests || models.directoryBusy() || imageModels.busy()||native.state().jobs.some(j=>j.state==='running')) return error(res, 409, 'Finish or cancel model downloads and loading before changing the folder.');
     if (serving.state().requests.some(r => ['queued', 'generating'].includes(r.state))) return error(res, 409, 'Finish or cancel model requests before changing the folder.');
     if (changed && instances.length && body.unload !== true) return error(res, 409, 'Unload the current models before changing the folder.');
     const nativePlan=nativeUnloadPlan({changed,unload:body.unload,instances:native.state().instances});
