@@ -212,6 +212,8 @@ Section "Strata Managed Models" SEC_APP
   CreateShortcut "$SMPROGRAMS\${PRODUCT}\${PRODUCT}.lnk" "$INSTDIR\StrataManaged.exe"
   CreateShortcut "$SMPROGRAMS\${PRODUCT}\Models.lnk" "$INSTDIR\StrataManaged.exe" "--models"
   CreateShortcut "$SMPROGRAMS\${PRODUCT}\API connections.lnk" "$INSTDIR\StrataManaged.exe" "--api"
+  CreateShortcut "$SMPROGRAMS\${PRODUCT}\Tailscaleで共有.lnk" "$INSTDIR\StrataManaged.exe" "--tailscale"
+  CreateShortcut "$SMPROGRAMS\${PRODUCT}\Tailscale共有を停止.lnk" "$INSTDIR\StrataManaged.exe" "--tailscale-off"
   CreateShortcut "$SMPROGRAMS\${PRODUCT}\Readme (Japanese).lnk" "$SYSDIR\notepad.exe" '"$INSTDIR\README.ja.txt"'
   WriteRegStr HKCU "${UNINST_KEY}" "DisplayName" "${PRODUCT}"
   WriteRegStr HKCU "${UNINST_KEY}" "DisplayVersion" "${VERSION}"
@@ -253,6 +255,10 @@ Section "Uninstall"
   Push "$INSTDIR"
   Call un.CheckTree
   IfFileExists "$INSTDIR\StrataManaged.exe" 0 stopped
+  ExecWait '"$INSTDIR\StrataManaged.exe" --tailscale-off --no-browser' $0
+  ${If} $0 != 0
+    !insertmacro Fail "Tailscale sharing could not be disabled. Check Tailscale, finish active requests, and try uninstalling again. Other Tailscale mappings were not removed."
+  ${EndIf}
   ExecWait '"$INSTDIR\StrataManaged.exe" --stop --wait' $0
   ${If} $0 != 0
     !insertmacro Fail "Close Strata Managed Models before uninstalling."
@@ -263,6 +269,8 @@ Section "Uninstall"
     Delete "$SMPROGRAMS\${PRODUCT}\${PRODUCT}.lnk"
     Delete "$SMPROGRAMS\${PRODUCT}\Models.lnk"
     Delete "$SMPROGRAMS\${PRODUCT}\API connections.lnk"
+    Delete "$SMPROGRAMS\${PRODUCT}\Tailscaleで共有.lnk"
+    Delete "$SMPROGRAMS\${PRODUCT}\Tailscale共有を停止.lnk"
     Delete "$SMPROGRAMS\${PRODUCT}\Readme (Japanese).lnk"
     RMDir "$SMPROGRAMS\${PRODUCT}"
     ; Only these installer-owned application folders are removed. User profiles/models are elsewhere.

@@ -195,7 +195,7 @@ export async function main() {
   await command(process.execPath, ['--test', 'managed-local/sync-and-release.test.mjs'], { cwd: root });
   await runNpm(['ci', '--ignore-scripts', '--no-audit', '--no-fund']);
   await runNpm(['run', 'typecheck']); await runNpm(['run', 'build']);
-  await command(process.execPath, ['--test', 'server/managed-local-models.test.mjs', 'server/update-maintenance.test.mjs', 'tests/managed-models-client.test.mjs', 'tests/native-picker.test.mjs', 'tests/model-picker.test.mjs'], { cwd: host });
+  await command(process.execPath, ['--test', 'server/managed-local-models.test.mjs', 'server/update-maintenance.test.mjs', 'server/tailscale-access.test.mjs', 'tests/managed-models-client.test.mjs', 'tests/native-picker.test.mjs', 'tests/model-picker.test.mjs'], { cwd: host });
   const installerTests=readdirSync(join(root,'managed-local/windows-installer')).filter(name=>name.endsWith('.test.mjs')).map(name=>'managed-local/windows-installer/'+name);
   if(installerTests.length)await command(process.execPath,['--test',...installerTests],{cwd:root});
   const files = await git(['ls-files', '-z', '--', 'apps/host', 'LICENSE', 'NOTICE', 'NOTICE.md']);
@@ -211,7 +211,7 @@ export async function main() {
   await git(['push', 'origin', `HEAD:refs/heads/${branch}`]);
   const release = await github(`/repos/${FORK}/releases`, { method: 'POST', body: { tag_name: tag, target_commitish: commit,
     name: `Strata ${latest.version} · モデル切替版`, draft: true, prerelease: false,
-    body: `Strata ${latest.version} のモデル切替版です。Windows用インストーラーはNodeとControlを同梱し、モデル未設定で起動します。モデルは画面から自由に追加し、追加済みモデルに応じてチャットの切替一覧が変わります。\n\n上流: https://github.com/${UPSTREAM}/releases/tag/${latest.tag}\n上流コミット: ${upstreamCommit}\n切替版コミット: ${commit}\n\n型チェック、画面ビルド、モデル切替・更新テスト、Windowsインストール・起動・再インストール・アンインストール時のユーザーデータ保持テストを通過しました。モデル本体、APIキー、会話履歴は配布物に含みません。\n` } });
+    body: `Strata ${latest.version} のモデル切替版です。Windows用インストーラーはNodeとControlを同梱し、モデル未設定で起動します。モデルは画面から自由に追加し、追加済みモデルに応じてチャットの切替一覧が変わります。\n\nTailscaleを別途導入して接続したPCでは、スタートメニューの「Tailscaleで共有」から、同じTailscaleネットワークの端末へHTTPSで共有できます。初期状態はPC内限定です。「Tailscale共有を停止」で解除できます。詳しい手順は同梱の日本語READMEをご覧ください。\n\n上流: https://github.com/${UPSTREAM}/releases/tag/${latest.tag}\n上流コミット: ${upstreamCommit}\n切替版コミット: ${commit}\n\n型チェック、画面ビルド、モデル切替・更新・Tailscaleアクセス制御テスト、Windowsインストール・起動・再インストール・アンインストール時のユーザーデータ保持テストを通過しました。モデル本体、APIキー、会話履歴は配布物に含みません。\n` } });
   await upload(release.id, packaged.archive, ARCHIVE, 'application/zip');
   await upload(release.id, packaged.manifestFile, 'managed-host.json', 'application/json');
   await upload(release.id,installer.installer,releaseManifest.installer.name,'application/vnd.microsoft.portable-executable');

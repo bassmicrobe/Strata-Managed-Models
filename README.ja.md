@@ -19,6 +19,16 @@ Windows 10／11の64ビット版が対象です。モデル本体は含めず、
 
 [詳しい日本語の使い方](managed-local/windows-installer/README.ja.md) はインストーラーにも同梱しています。
 
+## Tailscaleで他の端末から使う（任意）
+
+初期設定ではこのPC内だけで使います。別のPCやスマートフォンから使う場合は、実行PCと接続側の端末に [Tailscale](https://tailscale.com/download) を別途導入し、同じTailnetへ参加してください。
+
+実行PCのスタートメニューで **Tailscaleで共有** を選ぶと、Tailnet内のHTTPS共有URLが開きます。接続側はそのURLをブラウザーで開きます。接続側にStrataやモデルを入れる必要はありません。実行PCは起動したまま、スリープしない状態で使います。
+
+共有先でも同じ会話履歴・モデル・操作画面を使います。ユーザー別の領域は作りません。アクセスを許可する人や端末はTailscale側の権限で管理します。共有はTailnet内のServeを使い、Funnelによるインターネット公開は行いません。
+
+停止は **Tailscale共有を停止** です。[設定・使い方・停止の詳細](managed-local/windows-installer/README.ja.md#tailscaleで他の端末から使う任意) を参照してください。
+
 ## 更新と管理
 
 このforkの管理ブランチは managed-models です。大元の安定版を毎時確認し、取り込み・テスト・画面ビルド・Windowsインストーラー試験に合格した版だけを公開します。起動時は、その検証済み配布版を確認します。

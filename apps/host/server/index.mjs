@@ -88,6 +88,7 @@ import { validateChatImages } from './chat-images.mjs';
 import { createTimeSkip, measureFolder, timeskipRevisionMessage, imageTypeOf } from './timeskip.mjs';
 import { createManagedLocalModels } from './managed-local-models.mjs';
 import { createUpdateMaintenance } from './update-maintenance.mjs';
+import { createTailscaleAccess } from './tailscale-access.mjs';
 
 const HERE = fileURLToPath(new URL('.', import.meta.url));
 const ROOT = resolve(HERE, '..');
@@ -105,6 +106,7 @@ const DIST = process.env.STRATA_DIST
     : join(ROOT, 'dist');
 const PORT = Number(process.env.STRATA_PORT ?? 8791);
 const HOST = process.env.STRATA_BIND ?? '127.0.0.1';
+const tailscaleAccess = createTailscaleAccess({ origin: process.env.STRATA_TAILSCALE_ORIGIN, port: PORT });
 /* The folder chats work in when nothing else is chosen. It is never the app's own folder (the host is started inside its install
    directory, so `process.cwd()` was "host" in the sidebar and the agent could read and write the app): the person's own
    Documents\Strata\Workspace (the models folder is next to it, not in it), created on first use, unless STRATA_WORKSPACE names one. */
@@ -990,7 +992,9 @@ const server = http.createServer(async (req, res) => {
   }
 
   try {
-    if (path.startsWith('/api/') && req.headers.origin) {
+    if (tailscaleAccess.origin && req.headers.origin && (path.startsWith('/api/') || path.startsWith('/v1/'))) {
+      if (!tailscaleAccess.allowsBrowser(req)) return error(res, 403, 'Open the local Strata app or its configured Tailscale address.');
+    } else if (path.startsWith('/api/') && req.headers.origin) {
       const origin = new URL(req.headers.origin);
       if (!['localhost', '127.0.0.1', '[::1]'].includes(origin.hostname)) return error(res, 403, 'Open the local Strata app to use host controls.');
     }
@@ -1024,8 +1028,8 @@ async function api(req, res, path, method, url) {
     if (req.headers.origin) {
       try {
         const origin = new URL(req.headers.origin);
-        allowed &&= origin.protocol === 'http:' && ['127.0.0.1', 'localhost', '[::1]'].includes(origin.hostname)
-          && origin.host === req.headers.host && Number(origin.port || 80) === PORT;
+        allowed &&= tailscaleAccess.origin ? tailscaleAccess.allowsBrowser(req) : (origin.protocol === 'http:' && ['127.0.0.1', 'localhost', '[::1]'].includes(origin.hostname)
+          && origin.host === req.headers.host && Number(origin.port || 80) === PORT);
       } catch { allowed = false; }
     }
     if (!allowed) return error(res, 403, 'Not allowed.');

@@ -6,6 +6,7 @@ import {dirname,join,resolve,relative,isAbsolute,sep} from 'node:path';
 import {fileURLToPath,pathToFileURL} from 'node:url';
 import {randomUUID} from 'node:crypto';
 import {fetchForkRelease,stageForkRelease,FORK_REPOSITORY} from './fork-stage.mjs';
+import {readTailscaleConfig,planTailscale,applyTailscale,disableTailscale,tailscaleOrigin} from './tailscale.mjs';
 
 const sleep=ms=>new Promise(done=>setTimeout(done,ms));
 const json=file=>JSON.parse(readFileSync(file,'utf8').replace(/^\uFEFF/,''));
@@ -33,9 +34,10 @@ export function validateActive(paths,active){
 }
 export function hostEnvironment(paths,active,port,{profile=paths.profile,smoke=false}={}){
   const env={...process.env};
-  for(const key of ['PYTHONPATH','PYTHONHOME','PYTHONSTARTUP','STRATA_DATA_DIR','STRATA_MANAGED_MODELS_CONFIG','STRATA_HANDOVER','STRATA_NO_HANDOVER','STRATA_UPDATE_TRUSTED_KEYS','STRATA_DIST','GITHUB_TOKEN','GH_TOKEN'])delete env[key];
+  for(const key of ['PYTHONPATH','PYTHONHOME','PYTHONSTARTUP','STRATA_DATA_DIR','STRATA_MANAGED_MODELS_CONFIG','STRATA_HANDOVER','STRATA_NO_HANDOVER','STRATA_UPDATE_TRUSTED_KEYS','STRATA_DIST','STRATA_TAILSCALE_ORIGIN','GITHUB_TOKEN','GH_TOKEN'])delete env[key];
   Object.assign(env,{STRATA_HOME:profile,STRATA_DATA_DIR:paths.dataRoot,STRATA_STATE_DIR:join(paths.dataRoot,'state'),STRATA_COMPONENTS_DIR:join(paths.dataRoot,'components'),STRATA_CONTROL_DIR:paths.control,STRATA_INSTALL_DIR:join(paths.dataRoot,'install'),STRATA_PROFILE_DIR:join(paths.dataRoot,'profiles'),STRATA_RUNTIME_DIR:join(paths.dataRoot,'runtime'),STRATA_SETTINGS_FILE:join(paths.dataRoot,'app-settings.json'),STRATA_MODELS_DIR:join(paths.dataRoot,'models'),STRATA_WORKSPACE:join(paths.dataRoot,'Workspace'),STRATA_REAL_ENGINE:'1',STRATA_NO_ACQUIRE:'1',STRATA_APP_VERSION:active.version,STRATA_PORT:String(port),STRATA_BIND:'127.0.0.1',STRATA_UPDATE_MAINTENANCE_FILE:paths.maintenanceFile,STRATA_NO_BUNDLED_ENGINE:'1',STRATA_NO_REPAIR_ACCESS:'1'});
   const managed=join(paths.dataRoot,'managed-models.json');if(existsSync(managed))env.STRATA_MANAGED_MODELS_CONFIG=managed;
+  if(!smoke){const origin=paths.tailscaleOrigin??readTailscaleConfig(paths.dataRoot)?.url;if(origin)env.STRATA_TAILSCALE_ORIGIN=tailscaleOrigin(origin);}
   if(smoke)env.STRATA_SETTINGS_FILE=join(dirname(profile),'app-settings.json');
   return env;
 }
@@ -63,9 +65,10 @@ async function startHost(paths,active,{profile=paths.profile,smoke=false}={}){
   const port=await portFree(smoke?0:8792),entry=join(active.hostRoot,'server/index.mjs');
   const logs=join(paths.dataRoot,'logs');mkdirSync(logs,{recursive:true});
   const suffix=smoke?'-smoke-'+randomUUID().slice(0,8):'',out=openSync(join(logs,'host'+suffix+'.stdout.log'),'a',0o600),err=openSync(join(logs,'host'+suffix+'.stderr.log'),'a',0o600);
-  const child=spawn(paths.node,[entry,'--dist',join(active.hostRoot,'dist')],{cwd:active.hostRoot,detached:true,windowsHide:true,env:hostEnvironment(paths,active,port,{profile,smoke}),stdio:['ignore',out,err]});closeSync(out);closeSync(err);let failed;child.once('error',error=>{failed=error;});child.unref();
+  const env=hostEnvironment(paths,active,port,{profile,smoke});
+  const child=spawn(paths.node,[entry,'--dist',join(active.hostRoot,'dist')],{cwd:active.hostRoot,detached:true,windowsHide:true,env,stdio:['ignore',out,err]});closeSync(out);closeSync(err);let failed;child.once('error',error=>{failed=error;});child.unref();
   let actual=null;for(let i=0;i<10&&!actual;i++){if(failed||child.exitCode!==null)throw fail('The Strata host could not start.');actual=await processIdentity(child.pid);if(!actual)await sleep(200);}
-  const record={pid:child.pid,port,entry,executable:paths.node,created:actual?.created};
+  const record={pid:child.pid,port,entry,executable:paths.node,created:actual?.created,tailscaleOrigin:env.STRATA_TAILSCALE_ORIGIN??''};
   try{if(!record.created)throw fail('The application process identity could not be checked.');let ready=false;for(let i=0;i<80;i++){if(failed||child.exitCode!==null)throw fail('The Strata host stopped before it was ready.');try{await health(record);ready=true;break;}catch{}await sleep(500);}if(!ready)throw fail('Strata did not become ready.');if(!smoke)atomicJson(paths.pidFile,record);return record;}
   catch(error){if(child.exitCode===null)child.kill();throw error;}
 }
@@ -113,8 +116,17 @@ async function autoUpdate(paths,active,log){
   }finally{clearInterval(timer);try{if(json(paths.maintenanceFile).id===id)unlinkSync(paths.maintenanceFile);}catch{}}
 }
 async function makePrivate(paths){mkdirSync(paths.dataRoot,{recursive:true,mode:0o700});try{const helpers=await import(pathToFileURL(join(paths.host,'server/private-file.mjs')));helpers.makePrivateDir(paths.dataRoot);}catch{throw fail('Strata could not protect its application data folder.');}}
+export function sharingRestartNeeded(record,origin){return (record?.tailscaleOrigin??'')!==(origin??'');}
+async function restartForSharing(paths,active,record){
+  const id=randomUUID(),renew=()=>atomicJson(paths.maintenanceFile,{pid:process.pid,id,reason:'update',expiresAt:Date.now()+120000});renew();const timer=setInterval(renew,20000);timer.unref();
+  let models=[],stopped=false;
+  try{const state=await snapshot(record);if(!state.maintenance.enabled||!state.maintenance.active||isBusy(state.native,state.serving,state.maintenance))throw fail('回答やモデルの処理が終わってから、もう一度共有設定を実行してください。');models=state.native.instances.filter(i=>i.status==='ready').map(i=>i.model);await sleep(1500);await stopHost(paths,{record,token:id});stopped=true;const next=await startHost(paths,active);await restoreModels(next,models,id);return next;}
+  catch(error){if(stopped){const failed=await ownedRecord(paths);if(failed)await stopHost(paths,{record:failed,token:id});paths.tailscaleOrigin=record.tailscaleOrigin??'';const restored=await startHost(paths,active);await restoreModels(restored,models,id);}throw error;}
+  finally{clearInterval(timer);try{if(json(paths.maintenanceFile).id===id)unlinkSync(paths.maintenanceFile);}catch{}}
+}
+async function openBrowser(url){await command('powershell.exe',['-NoLogo','-NoProfile','-NonInteractive','-Command',`Start-Process '${url.replace(/'/g,"''")}'`]);}
 export async function main(args=process.argv.slice(2),options={}){
-  if(args.some(arg=>!['--stop','--wait','--smoke','--no-browser','--models','--api'].includes(arg)))throw fail('Unknown launcher option.');
+  if(args.some(arg=>!['--stop','--wait','--smoke','--no-browser','--models','--api','--tailscale','--tailscale-off'].includes(arg))||args.includes('--tailscale')&&args.includes('--tailscale-off')||args.includes('--smoke')&&(args.includes('--tailscale')||args.includes('--tailscale-off')))throw fail('Unknown launcher option.');
   const paths=layout(options);if(!existsSync(paths.node)||!existsSync(join(paths.control,'python/python.exe')))throw fail('The bundled runtime is incomplete. Run the installer again.');
   await makePrivate(paths);mkdirSync(join(paths.dataRoot,'logs'),{recursive:true});
   const log=message=>writeFileSync(join(paths.dataRoot,'logs/launcher.log'),new Date().toISOString()+' '+message+'\n',{flag:'a',mode:0o600});
@@ -130,12 +142,27 @@ export async function main(args=process.argv.slice(2),options={}){
     finally{if(ownsProcess(paths,record,await processIdentity(record.pid))){process.kill(record.pid);await waitExit(record.pid);}}
     atomicJson(resultFile,result);return result;
   }
+  if(args.includes('--tailscale-off')){
+    const saved=readTailscaleConfig(paths.dataRoot);if(!saved)return{disabled:true,changed:false};
+    let record=await ownedRecord(paths);if(record){const state=await snapshot(record);if(isBusy(state.native,state.serving,state.maintenance))throw fail('回答やモデルの処理が終わってから、共有を停止してください。');}
+    const result=await disableTailscale({dataRoot:paths.dataRoot});paths.tailscaleOrigin='';
+    if(record&&sharingRestartNeeded(record,''))record=await restartForSharing(paths,active,record);
+    log('Tailscale共有を停止しました。');return result;
+  }
+  let sharingPlan=null,savedSharing=null;
+  try{savedSharing=readTailscaleConfig(paths.dataRoot);if(args.includes('--tailscale')||savedSharing)sharingPlan=await planTailscale({dataRoot:paths.dataRoot});}
+  catch(error){if(args.includes('--tailscale'))throw error;log('Tailscale共有を再開できませんでした。ローカル画面を開きます。');}
+  paths.tailscaleOrigin=sharingPlan?.url??savedSharing?.url??'';
   try{active=await autoUpdate(paths,active,log);}catch{log('更新の検証に失敗しました。保存済みの版で起動します。');}
   let record=await ownedRecord(paths);if(record&&resolve(record.entry)!==resolve(join(active.hostRoot,'server/index.mjs'))){await stopHost(paths,{record});record=null;}
+  if(record&&sharingRestartNeeded(record,paths.tailscaleOrigin))record=await restartForSharing(paths,active,record);
   if(!record)record=await startHost(paths,active);atomicJson(paths.activeFile,active);
+  let shared=null;
+  if(sharingPlan){try{shared=await applyTailscale({dataRoot:paths.dataRoot,hostPort:record.port,plan:sharingPlan});log('Tailscale共有: '+shared.url);}catch(error){if(args.includes('--tailscale')){if(error.actionUrl&&!args.includes('--no-browser'))await openBrowser(error.actionUrl);throw error;}log('Tailscale共有を再開できませんでした。ローカル画面を開きます。');}}
   const first=!existsSync(join(paths.dataRoot,'first-run.json')),target=args.includes('--api')?'#/settings?section=Models':args.includes('--models')||first?'#/models':'#/chat';
-  if(!args.includes('--no-browser')){await command('powershell.exe',['-NoLogo','-NoProfile','-NonInteractive','-Command',`Start-Process 'http://127.0.0.1:${record.port}/${target}'`]);atomicJson(join(paths.dataRoot,'first-run.json'),{openedAt:new Date().toISOString()});}
-  return {ok:true,version:active.version,url:`http://127.0.0.1:${record.port}/${target}`,pid:record.pid};
+  const url=`${shared?.url??'http://127.0.0.1:'+record.port}/${target}`;
+  if(!args.includes('--no-browser')){await openBrowser(url);atomicJson(join(paths.dataRoot,'first-run.json'),{openedAt:new Date().toISOString()});}
+  return {ok:true,version:active.version,url,pid:record.pid,tailscale:!!shared};
 }
 if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url)){
   try{console.log(JSON.stringify(await main()));}catch(error){const message=error instanceof Error?error.message:'Strata could not start.';try{const paths=layout();mkdirSync(join(paths.dataRoot,'logs'),{recursive:true});writeFileSync(join(paths.dataRoot,'logs/launcher.log'),new Date().toISOString()+' '+message+'\n',{flag:'a',mode:0o600});}catch{}console.error(message);process.exitCode=1;}

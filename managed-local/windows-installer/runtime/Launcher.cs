@@ -23,7 +23,7 @@ internal static class Launcher {
         bool quiet = false;
         foreach (string arg in args) {
             if (arg == "--stop" || arg == "--smoke" || arg == "--no-browser") quiet = true;
-            if (arg != "--stop" && arg != "--wait" && arg != "--smoke" && arg != "--no-browser" && arg != "--models" && arg != "--api") return 2;
+            if (arg != "--stop" && arg != "--wait" && arg != "--smoke" && arg != "--no-browser" && arg != "--models" && arg != "--api" && arg != "--tailscale" && arg != "--tailscale-off") return 2;
         }
         string root = AppDomain.CurrentDomain.BaseDirectory;
         string data = Environment.GetEnvironmentVariable("STRATA_MANAGED_DATA_DIR") ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "StrataManaged");
@@ -50,6 +50,7 @@ internal static class Launcher {
                     process.ErrorDataReceived += delegate(object sender, DataReceivedEventArgs e) { if (e.Data != null && errors.Length < 4096) errors.AppendLine(e.Data); };
                     process.Start(); process.BeginOutputReadLine(); process.BeginErrorReadLine(); process.WaitForExit();
                     if (process.ExitCode != 0 && !quiet) MessageBox.Show("Strata を起動できませんでした。\n\n" + errors.ToString() + "\nログ: " + Path.Combine(data, "logs", "launcher.log"), "Strata Managed Models", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    if (process.ExitCode == 0 && !quiet && Array.IndexOf(args, "--tailscale-off") >= 0) MessageBox.Show("Tailscale共有を停止しました。", "Strata Managed Models", MessageBoxButtons.OK, MessageBoxIcon.Information);
                     return process.ExitCode;
                 }
             } catch (Exception error) { if (!quiet) MessageBox.Show(error.Message, "Strata Managed Models", MessageBoxButtons.OK, MessageBoxIcon.Error); return 1; }
