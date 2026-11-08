@@ -42,10 +42,11 @@ function inside(base, file) {
 }
 export function command(file, args, { cwd, timeout = 300000 } = {}) {
   return new Promise((ok, bad) => {
-    execFile(file, args, { cwd, timeout, windowsHide: true, maxBuffer: 8 * 1024 * 1024, env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never' } }, (error, stdout, stderr) => {
+    const child = execFile(file, args, { cwd, timeout, windowsHide: true, maxBuffer: 8 * 1024 * 1024, env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never' } }, (error, stdout, stderr) => {
       if (error) { bad(Object.assign(new Error('A merge, build, or verification command failed.'), { detail: String(stdout).slice(-12000) + String(stderr).slice(-12000) })); }
       else ok(String(stdout));
     });
+    child.stdin?.end();
   });
 }
 async function github(path, { method = 'GET', body, missing = false } = {}) {
@@ -97,7 +98,26 @@ export async function packageHost(root, manifest, tracked) {
   }
   writeFileSync(join(packageRoot, 'managed-host.json'), JSON.stringify(manifest, null, 2));
   const archive = join(output, ARCHIVE), packer = join(output, 'pack.ps1');
-  writeFileSync(packer, "param([string]$Source,[string]$Archive)\n$ErrorActionPreference = 'Stop'\nAdd-Type -AssemblyName System.IO.Compression.FileSystem\n[IO.Compression.ZipFile]::CreateFromDirectory($Source,$Archive,[IO.Compression.CompressionLevel]::Optimal,$false)\n");
+  writeFileSync(packer, String.raw`param([string]$Source,[string]$Archive)
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.IO.Compression
+$prefix = [IO.Path]::GetFullPath($Source).TrimEnd([char[]]'\/') + [IO.Path]::DirectorySeparatorChar
+$stream = [IO.File]::Open($Archive,[IO.FileMode]::CreateNew,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
+try {
+    $zip = [IO.Compression.ZipArchive]::new($stream,[IO.Compression.ZipArchiveMode]::Create,$true)
+    try {
+        foreach ($file in (Get-ChildItem -LiteralPath $Source -File -Recurse -Force)) {
+            $name = $file.FullName.Substring($prefix.Length).Replace('\','/')
+            $entry = $zip.CreateEntry($name,[IO.Compression.CompressionLevel]::Optimal)
+            $destination = $entry.Open()
+            try {
+                $sourceStream = [IO.File]::OpenRead($file.FullName)
+                try { $sourceStream.CopyTo($destination) } finally { $sourceStream.Dispose() }
+            } finally { $destination.Dispose() }
+        }
+    } finally { $zip.Dispose() }
+} finally { $stream.Dispose() }
+`);
   await command('powershell.exe', ['-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', packer, '-Source', packageRoot, '-Archive', archive], { cwd: root });
   const data = readFileSync(archive), external = { ...manifest, archive: { name: ARCHIVE, sha256: createHash('sha256').update(data).digest('hex'), size: data.length } };
   const manifestFile = join(output, 'managed-host.json'); writeFileSync(manifestFile, JSON.stringify(external, null, 2));
