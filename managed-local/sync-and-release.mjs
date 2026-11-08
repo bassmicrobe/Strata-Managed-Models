@@ -59,19 +59,46 @@ async function github(path, { method = 'GET', body, missing = false } = {}) {
   if (!response.ok) throw new Error(`GitHub operation failed (HTTP ${response.status}).`);
   return response.status === 204 ? null : response.json();
 }
-async function previousManifest() {
-  const latest = await github(`/repos/${FORK}/releases/latest`, { missing: true });
-  if (!latest) return null;
-  const asset = latest.assets?.find(asset => asset.name === 'managed-host.json');
-  if (!asset || !/^managed-v\d+\.\d+\.\d+-\d+$/.test(latest.tag_name ?? '') || asset.size > 65536) return null;
-  const url = `https://github.com/${FORK}/releases/download/${latest.tag_name}/managed-host.json`;
-  if (asset.browser_download_url !== url) return null;
-  // Public release downloads need no credential; never forward the workflow token to a redirected storage host.
-  const response = await fetch(url, { signal: AbortSignal.timeout(30000) });
-  if (!response.ok) throw new Error('The previous managed release could not be checked.');
-  const text = await response.text(); if (text.length > 65536) throw new Error('The previous release manifest is too large.');
-  const value = JSON.parse(text);
-  return value.feature === FEATURE && value.sourceRepository === FORK && COMMIT.test(value.commit ?? '') ? value : null;
+export async function previousManifest({ fetchImpl = fetch, token = process.env.GITHUB_TOKEN } = {}) {
+  const base = `https://api.github.com/repos/${FORK}`;
+  const apiHeaders = { accept: 'application/vnd.github+json', 'x-github-api-version': '2022-11-28',
+    ...(token ? { authorization: `Bearer ${token}` } : {}) };
+  const signal = AbortSignal.timeout(30000);
+  const request = async (url, options, step) => {
+    try { return await fetchImpl(url, { ...options, signal }); }
+    catch { throw new Error(`The previous managed release could not be checked at ${step} (network request failed).`); }
+  };
+  const metadata = await request(base + '/releases/latest', { headers: apiHeaders, redirect: 'error' }, 'release metadata');
+  if (metadata.status === 404) return null; // No published release is the only case in which there is nothing to compare.
+  if (!metadata.ok) throw new Error(`The previous managed release metadata failed (HTTP ${metadata.status}).`);
+  const latest = await metadata.json();
+  const match = /^managed-v(\d+\.\d+\.\d+)-\d+$/.exec(latest.tag_name ?? '');
+  const assets = latest.assets?.filter(asset => asset.name === 'managed-host.json');
+  const asset = assets?.length === 1 ? assets[0] : null;
+  if (!match || latest.draft || latest.prerelease || !asset || !Number.isSafeInteger(asset.id) || asset.id <= 0
+    || !Number.isSafeInteger(asset.size) || asset.size <= 0 || asset.size > 65536) throw new Error('The previous managed release metadata is invalid.');
+  // Ask GitHub for asset bytes directly, avoiding the public download URL's edge cache.
+  // The workflow token reaches api.github.com only; it is never sent to the signed CDN URL.
+  let response = await request(base + `/releases/assets/${asset.id}`, {
+    headers: { ...apiHeaders, accept: 'application/octet-stream' }, redirect: 'manual',
+  }, 'asset API');
+  if ([301, 302, 303, 307, 308].includes(response.status)) {
+    let target;
+    try {
+      target = new URL(response.headers.get('location'));
+      if (target.protocol !== 'https:' || target.hostname !== 'release-assets.githubusercontent.com' || target.username || target.password) throw new Error();
+    } catch { throw new Error('The previous managed manifest asset redirect is invalid.'); }
+    await response.body?.cancel();
+    response = await request(target.href, { headers: { accept: 'application/octet-stream' }, redirect: 'error' }, 'asset CDN');
+    if (!response.ok) throw new Error(`The previous managed manifest CDN download failed (HTTP ${response.status}).`);
+  } else if (!response.ok) throw new Error(`The previous managed manifest asset API failed (HTTP ${response.status}).`);
+  const bytes = Buffer.from(await response.arrayBuffer());
+  if (bytes.length !== asset.size || bytes.length > 65536) throw new Error('The previous release manifest size does not match its asset.');
+  if (asset.digest && asset.digest !== 'sha256:' + createHash('sha256').update(bytes).digest('hex')) throw new Error('The previous release manifest checksum does not match its asset.');
+  let value; try { value = JSON.parse(bytes.toString('utf8')); } catch { throw new Error('The previous release manifest is invalid JSON.'); }
+  if (value.schema_version !== 1 || value.feature !== FEATURE || value.sourceRepository !== FORK || value.version !== match[1]
+    || !COMMIT.test(value.commit ?? '') || !COMMIT.test(value.upstreamCommit ?? '') || value.upstreamTag !== 'v' + match[1]) throw new Error('The previous managed release manifest identity is invalid.');
+  return value;
 }
 export function buildFiles(root, tracked) {
   const paths = new Set(tracked.split('\0').filter(bundlePath));

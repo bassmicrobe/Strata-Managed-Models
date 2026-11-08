@@ -60,5 +60,5 @@ jobs:
           path: |
             ${{ runner.temp }}/strata-managed-*/windows-installer/*setup.exe
             ${{ runner.temp }}/strata-managed-*/installer-test/install.log
-            ${{ runner.temp }}/strata-managed-*/installer-test/user-data/smoke-result.json
-            ${{ runner.temp }}/strata-managed-*/installer-test/user-data/logs/*.log
+            ${{ runner.temp }}/strata-managed-*/installer-test/user-data*/smoke-result.json
+            ${{ runner.temp }}/strata-managed-*/installer-test/user-data*/logs/*.log

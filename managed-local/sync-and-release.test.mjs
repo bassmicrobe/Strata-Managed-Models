@@ -4,7 +4,66 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
-import { bundleManifest, bundlePath, compareVersions, stableRelease, packageHost, command, FEATURE, FORK } from './sync-and-release.mjs';
+import { bundleManifest, bundlePath, compareVersions, stableRelease, packageHost, command, previousManifest, FEATURE, FORK } from './sync-and-release.mjs';
+
+function previousFixture() {
+  const value = bundleManifest({ version: '0.2.12', commit: 'a'.repeat(40), upstreamCommit: 'b'.repeat(40), upstreamTag: 'v0.2.12' });
+  const bytes = Buffer.from(JSON.stringify(value));
+  return { value, bytes, latest: { tag_name: 'managed-v0.2.12-7', draft: false, prerelease: false,
+    assets: [{ id: 723399580, name: 'managed-host.json', size: bytes.length, digest: 'sha256:' + createHash('sha256').update(bytes).digest('hex') }] } };
+}
+test('previous manifest uses the authenticated asset API and strips authentication before the CDN request', async () => {
+  const f = previousFixture(), calls = [], token = 'workflow-token-test';
+  const fetchImpl = async (url, options) => {
+    calls.push({ url, options });
+    if (calls.length === 1) return Response.json(f.latest);
+    if (calls.length === 2) return new Response(null, { status: 302, headers: { location: 'https://release-assets.githubusercontent.com/github-production-release-asset/fixture?signature=public-asset' } });
+    return new Response(f.bytes);
+  };
+  assert.deepEqual(await previousManifest({ fetchImpl, token }), f.value);
+  assert.equal(calls.length, 3); assert.equal(calls[1].url, `https://api.github.com/repos/${FORK}/releases/assets/723399580`);
+  assert.equal(calls[0].options.headers.authorization, 'Bearer ' + token); assert.equal(calls[1].options.headers.authorization, 'Bearer ' + token);
+  assert.equal(calls[1].options.headers.accept, 'application/octet-stream'); assert.equal(calls[1].options.redirect, 'manual');
+  assert.equal(calls[2].options.redirect, 'error'); assert(!('authorization' in calls[2].options.headers));
+  assert(!JSON.stringify(calls[2]).includes(token));
+});
+test('a direct asset API response is verified without using the public download URL', async () => {
+  const f = previousFixture(); let calls = 0;
+  assert.deepEqual(await previousManifest({ token: '', fetchImpl: async (url, options) => {
+    calls++; assert(url.startsWith('https://api.github.com/')); assert(!options.headers.authorization);
+    return calls === 1 ? Response.json(f.latest) : new Response(f.bytes);
+  } }), f.value); assert.equal(calls, 2);
+});
+test('a non-ok previous-release request stops publication instead of silently skipping the comparison', async () => {
+  const f = previousFixture();
+  for (const [phase, status, expected] of [['metadata', 403, /metadata failed \(HTTP 403\)/], ['api', 404, /asset API failed \(HTTP 404\)/], ['cdn', 503, /CDN download failed \(HTTP 503\)/]]) {
+    let calls = 0;
+    await assert.rejects(previousManifest({ token: 'never-log-this', fetchImpl: async () => {
+      calls++;
+      if (calls === 1) return phase === 'metadata' ? new Response(null, { status }) : Response.json(f.latest);
+      if (phase === 'api') return new Response(null, { status });
+      if (calls === 2) return new Response(null, { status: 302, headers: { location: 'https://release-assets.githubusercontent.com/fixture' } });
+      return new Response(null, { status });
+    } }), expected);
+  }
+  assert.equal(await previousManifest({ fetchImpl: async () => new Response(null, { status: 404 }) }), null);
+});
+test('previous-manifest redirects to insecure or unrelated hosts are rejected before a second asset request', async () => {
+  const f = previousFixture();
+  for (const location of ['http://release-assets.githubusercontent.com/fixture', 'https://example.com/fixture', 'https://api.github.com/fixture', 'https://user:password@release-assets.githubusercontent.com/fixture']) {
+    let calls = 0;
+    await assert.rejects(previousManifest({ token: 'never-leak', fetchImpl: async () => {
+      calls++; return calls === 1 ? Response.json(f.latest) : new Response(null, { status: 302, headers: { location } });
+    } }), /redirect is invalid/); assert.equal(calls, 2);
+  }
+});
+test('malformed previous-release metadata or manifest bytes cannot bypass the previous-release gate', async () => {
+  const f = previousFixture();
+  for (const latest of [{ ...f.latest, assets: [] }, { ...f.latest, prerelease: true }, { ...f.latest, assets: [{ ...f.latest.assets[0], id: -1 }] }]) {
+    let calls = 0; await assert.rejects(previousManifest({ fetchImpl: async () => { calls++; return Response.json(latest); } }), /metadata is invalid/); assert.equal(calls, 1);
+  }
+  let calls = 0; await assert.rejects(previousManifest({ fetchImpl: async () => ++calls === 1 ? Response.json(f.latest) : new Response('truncated') }), /size does not match/);
+});
 
 const release = (tag_name, extra = {}) => ({ tag_name, html_url: `https://github.com/Niko1221/Strata/releases/tag/${tag_name}`, draft: false, prerelease: false, ...extra });
 test('only official stable release metadata is accepted', () => {
