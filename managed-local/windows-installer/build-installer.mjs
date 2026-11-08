@@ -66,12 +66,40 @@ export function collectLicenses(repoRoot,destination){
   }
   writeFileSync(join(destination,'THIRD-PARTY-NOTICES.md'),notices.join('\n')+'\n');return {packages,files};
 }
-async function download(url,target,expected,{fetchImpl=fetch}={}){
+async function controlAssetFallback(match,expected,{fetchImpl,token,initialFailure}){
+  const [url,tag,name]=match,base='https://api.github.com/repos/Niko1221/Strata',signal=AbortSignal.timeout(180000);
+  const headers={accept:'application/vnd.github+json','x-github-api-version':'2022-11-28',...(token?{authorization:'Bearer '+token}:{})};
+  const request=async(address,options,phase)=>{try{return await fetchImpl(address,{...options,signal});}catch{throw Error(`${initialFailure}; official Control fallback failed at ${phase} (network request failed).`);}};
+  const metadata=await request(base+'/releases/tags/'+tag,{headers,redirect:'error'},'api.github.com release metadata');
+  if(!metadata.ok)throw Error(`${initialFailure}; official Control fallback metadata failed at api.github.com (HTTP ${metadata.status}).`);
+  const release=await metadata.json(),assets=release.assets?.filter(a=>a.name===name);
+  const asset=assets?.length===1?assets[0]:null;
+  if(release.tag_name!==tag||release.draft||release.prerelease||!asset||!Number.isSafeInteger(asset.id)||asset.id<=0
+    ||!Number.isSafeInteger(asset.size)||asset.size<=0||asset.size>MAX_ARCHIVE||asset.browser_download_url!==url
+    ||asset.digest&&asset.digest!=='sha256:'+expected)throw Error('The official Control fallback asset metadata is invalid.');
+  let response=await request(base+'/releases/assets/'+asset.id,{headers:{...headers,accept:'application/octet-stream'},redirect:'manual'},'api.github.com asset API');
+  if([301,302,303,307,308].includes(response.status)){
+    let target;try{target=new URL(response.headers.get('location'));if(target.protocol!=='https:'||target.hostname!=='release-assets.githubusercontent.com'||target.username||target.password)throw Error();}catch{throw Error('The official Control fallback asset redirect is invalid.');}
+    await response.body?.cancel();
+    response=await request(target.href,{headers:{accept:'application/octet-stream'},redirect:'error'},'release-assets.githubusercontent.com asset CDN');
+    if(!response.ok)throw Error(`${initialFailure}; official Control fallback failed at release-assets.githubusercontent.com (HTTP ${response.status}).`);
+  }else if(!response.ok)throw Error(`${initialFailure}; official Control fallback failed at api.github.com asset API (HTTP ${response.status}).`);
+  return{response,size:asset.size};
+}
+export async function download(url,target,expected,{fetchImpl=fetch,token=process.env.GITHUB_TOKEN}={}){
   if(existsSync(target)&&sha(readFileSync(target))===expected)return;
-  const response=await fetchImpl(url,{signal:AbortSignal.timeout(180000)});
-  if(!response.ok)throw Error('An official Windows runtime could not be downloaded.');
+  const control=/^https:\/\/github\.com\/Niko1221\/Strata\/releases\/download\/(v\d+\.\d+\.\d+)\/(strata-control-\d+\.\d+\.\d+-windows-x86_64\.zip)$/.exec(url);
+  let response,size,initialFailure;
+  try{response=await fetchImpl(url,{signal:AbortSignal.timeout(control?30000:180000)});}catch{initialFailure=`Official runtime download failed at ${new URL(url).hostname} (network request failed)`;}
+  if(response&&!response.ok)initialFailure=`Official runtime download failed at ${new URL(url).hostname} (HTTP ${response.status})`;
+  if(initialFailure){
+    if(!control)throw Error(initialFailure+'.');
+    await response?.body?.cancel();
+    console.log(initialFailure+'; using the official GitHub asset API.');
+    ({response,size}=await controlAssetFallback(control,expected,{fetchImpl,token,initialFailure}));
+  }
   const chunks=[];let total=0;for await(const chunk of response.body){total+=chunk.length;if(total>MAX_ARCHIVE)throw Error('The official runtime archive is larger than expected.');chunks.push(chunk);}
-  const bytes=Buffer.concat(chunks);if(sha(bytes)!==expected)throw Error('The official runtime archive checksum does not match.');
+  const bytes=Buffer.concat(chunks);if(size!==undefined&&bytes.length!==size)throw Error('The official Control archive size does not match its asset.');if(sha(bytes)!==expected)throw Error('The official runtime archive checksum does not match.');
   writeFileSync(target,bytes,{flag:'w'});
 }
 export async function controlDescriptor(version,{fetchImpl=fetch}={}){

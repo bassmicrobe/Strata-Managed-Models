@@ -3,10 +3,31 @@ import assert from 'node:assert/strict';
 import {mkdtempSync,mkdirSync,readFileSync,writeFileSync,existsSync,symlinkSync,readdirSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {copyHost,hostFileAllowed,collectLicenses,controlDescriptor,CONTROL_SHA256,NODE_SHA256} from './build-installer.mjs';
+import {createHash} from 'node:crypto';
+import {copyHost,hostFileAllowed,collectLicenses,controlDescriptor,download,CONTROL_SHA256,NODE_SHA256} from './build-installer.mjs';
 
 const temp=()=>mkdtempSync(join(tmpdir(),'smm-installer-'));
 const save=(path,text)=>{mkdirSync(join(path,'..'),{recursive:true});writeFileSync(path,text);};
+function controlFixture(){const bytes=Buffer.from('verified official Control fixture'),sha=createHash('sha256').update(bytes).digest('hex'),url='https://github.com/Niko1221/Strata/releases/download/v0.2.12/strata-control-0.1.58-windows-x86_64.zip';return{bytes,sha,url,metadata:{tag_name:'v0.2.12',draft:false,prerelease:false,assets:[{id:42,name:'strata-control-0.1.58-windows-x86_64.zip',size:bytes.length,digest:'sha256:'+sha,browser_download_url:url}]}};}
+test('a Control public download failure falls back through its official asset API without forwarding credentials to the CDN',async()=>{
+  const f=controlFixture(),target=join(temp(),'control.zip'),calls=[],token='workflow-token-test';
+  await download(f.url,target,f.sha,{token,fetchImpl:async(url,options)=>{calls.push({url,options});if(calls.length===1)return new Response(null,{status:504});if(calls.length===2)return Response.json(f.metadata);if(calls.length===3)return new Response(null,{status:302,headers:{location:'https://release-assets.githubusercontent.com/official-control?asset=42'}});return new Response(f.bytes);}});
+  assert.deepEqual(readFileSync(target),f.bytes);assert.equal(calls.length,4);assert(!calls[0].options.headers);assert.equal(calls[1].options.headers.authorization,'Bearer '+token);assert.equal(calls[2].url,'https://api.github.com/repos/Niko1221/Strata/releases/assets/42');assert.equal(calls[2].options.redirect,'manual');assert.equal(calls[2].options.headers.accept,'application/octet-stream');assert(!JSON.stringify(calls[3]).includes(token));assert(!('authorization' in calls[3].options.headers));assert.equal(calls[3].options.redirect,'error');
+});
+test('Control fallback rejects failed HTTP responses and bytes that do not match the pinned checksum',async()=>{
+  const f=controlFixture();
+  for(const failure of ['metadata','asset','cdn','checksum']){
+    const target=join(temp(),'control.zip');let calls=0;
+    await assert.rejects(download(f.url,target,f.sha,{fetchImpl:async()=>{calls++;if(calls===1)return new Response(null,{status:504});if(calls===2)return failure==='metadata'?new Response(null,{status:403}):Response.json(f.metadata);if(calls===3)return failure==='asset'?new Response(null,{status:404}):new Response(null,{status:302,headers:{location:'https://release-assets.githubusercontent.com/fixture'}});return failure==='cdn'?new Response(null,{status:503}):new Response(Buffer.alloc(f.bytes.length,0));}}),failure==='checksum'?/checksum does not match/:/HTTP (?:403|404|503)/);
+    assert(!existsSync(target));
+  }
+});
+test('the Control fallback rejects an unrelated redirect before sending another request',async()=>{
+  const f=controlFixture();let calls=0;await assert.rejects(download(f.url,join(temp(),'control.zip'),f.sha,{fetchImpl:async()=>{calls++;if(calls===1)return new Response(null,{status:504});if(calls===2)return Response.json(f.metadata);return new Response(null,{status:302,headers:{location:'https://example.com/untrusted'}});}}),/redirect is invalid/);assert.equal(calls,3);
+});
+test('Node.js downloads keep their original direct path and never use GitHub authentication or the Control fallback',async()=>{
+  let calls=0;await assert.rejects(download('https://nodejs.org/dist/v24.12.0/node-v24.12.0-win-x64.zip',join(temp(),'node.zip'),'a'.repeat(64),{token:'never-send',fetchImpl:async(url,options)=>{calls++;assert(url.startsWith('https://nodejs.org/'));assert(!options.headers);return new Response(null,{status:504});}}),/nodejs.org \(HTTP 504\)/);assert.equal(calls,1);
+});
 test('installer host copy excludes dependency caches and secret environment files while retaining built UI and source',()=>{
   const root=temp(),source=join(root,'source'),target=join(root,'payload/host');
   for(const path of ['server/index.mjs','dist/index.html','src/components/ChatModelPicker.tsx','package.json'])save(join(source,path),'public source');
