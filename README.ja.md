@@ -19,15 +19,22 @@ Windows 10／11の64ビット版が対象です。モデル本体は含めず、
 
 [詳しい日本語の使い方](managed-local/windows-installer/README.ja.md) はインストーラーにも同梱しています。
 
+<a id="tailscale"></a>
+
 ## Tailscaleで他の端末から使う（任意）
 
 初期設定ではこのPC内だけで使います。別のPCやスマートフォンから使う場合は、実行PCと接続側の端末に [Tailscale](https://tailscale.com/download) を別途導入し、同じTailnetへ参加してください。
 
-実行PCのスタートメニューで **Tailscaleで共有** を選ぶと、Tailnet内のHTTPS共有URLが開きます。接続側はそのURLをブラウザーで開きます。接続側にStrataやモデルを入れる必要はありません。実行PCは起動したまま、スリープしない状態で使います。
+1. **実行PC**でStrataに使いたいモデルを追加し、スタートメニューの **Strata Managed Models → Tailscaleで共有** を選びます。
+2. 初回にHTTPS／Serveの有効化画面が開いたら、Tailscaleへログインして案内を完了し、もう一度 **Tailscaleで共有** を実行します。
+3. 開いた **`https://…ts.net/` のURL**を、接続側のブラウザーで開きます。`:8443` などのポート番号が付いている場合は省略しないでください。接続側の `127.0.0.1` を開く方法ではありません。
+4. チャット上部のモデル名から追加済みモデルを選び、通常どおり使います。接続側にStrataやモデル本体は不要で、推論は実行PCで行います。
+
+実行PCの電源・Tailscale・Strataを起動したまま、スリープしない状態で使います。共有メニューが見つからない旧インストーラー版では、[最新のsetup.exe](https://github.com/bassmicrobe/Strata-Managed-Models/releases/latest)を上書き実行してください。設定・会話・モデルは保持します。
 
 共有先でも同じ会話履歴・モデル・操作画面を使います。ユーザー別の領域は作りません。アクセスを許可する人や端末はTailscale側の権限で管理します。共有はTailnet内のServeを使い、Funnelによるインターネット公開は行いません。
 
-停止は **Tailscale共有を停止** です。[設定・使い方・停止の詳細](managed-local/windows-installer/README.ja.md#tailscaleで他の端末から使う任意) を参照してください。
+停止は、回答やモデル操作が終わってから **Tailscale共有を停止** を選びます。再開は **Tailscaleで共有** です。[設定・使い方・つながらない場合の確認](managed-local/windows-installer/README.ja.md#tailscale) を参照してください。
 
 ## 更新と管理
 
