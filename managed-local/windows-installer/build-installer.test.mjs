@@ -28,6 +28,20 @@ test('the Control fallback rejects an unrelated redirect before sending another 
 test('Node.js downloads keep their original direct path and never use GitHub authentication or the Control fallback',async()=>{
   let calls=0;await assert.rejects(download('https://nodejs.org/dist/v24.12.0/node-v24.12.0-win-x64.zip',join(temp(),'node.zip'),'a'.repeat(64),{token:'never-send',fetchImpl:async(url,options)=>{calls++;assert(url.startsWith('https://nodejs.org/'));assert(!options.headers);return new Response(null,{status:504});}}),/nodejs.org \(HTTP 504\)/);assert.equal(calls,1);
 });
+
+test('the verified official installer carrying Harness also supports the authenticated asset fallback',async()=>{
+  const f=controlFixture(),name='Strata-0.2.12-windows-x64-setup.exe';
+  f.url='https://github.com/Niko1221/Strata/releases/download/v0.2.12/'+name;
+  Object.assign(f.metadata.assets[0],{name,browser_download_url:f.url});
+  const target=join(temp(),name);let calls=0;
+  await download(f.url,target,f.sha,{fetchImpl:async()=>{
+    calls++;
+    if(calls===1)return new Response(null,{status:504});
+    if(calls===2)return Response.json(f.metadata);
+    return new Response(f.bytes);
+  }});
+  assert.equal(calls,3);assert.deepEqual(readFileSync(target),f.bytes);
+});
 test('installer host copy excludes dependency caches and secret environment files while retaining built UI and source',()=>{
   const root=temp(),source=join(root,'source'),target=join(root,'payload/host');
   for(const path of ['server/index.mjs','dist/index.html','src/components/ChatModelPicker.tsx','package.json'])save(join(source,path),'public source');

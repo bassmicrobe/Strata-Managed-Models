@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {mkdtempSync,mkdirSync,writeFileSync,readFileSync,existsSync,copyFileSync,linkSync,symlinkSync,unlinkSync} from 'node:fs';
 import {tmpdir} from 'node:os';
-import {join,resolve,dirname} from 'node:path';
+import {join,resolve,dirname,delimiter} from 'node:path';
 import {spawn,execFileSync} from 'node:child_process';
 import {createServer} from 'node:net';
 import {layout,hostEnvironment,releaseIsNew,bundledIsNewer,validateActive,isBusy,ownsProcess,processIdentity,main,stopHost} from './runtime/runtime.mjs';
@@ -18,10 +18,34 @@ function fixture({unicode=false}={}){
   return {root,appRoot,dataRoot,paths:layout({appRoot,dataRoot}),active:{version:'0.2.12',commit:'a'.repeat(40),releaseTag:'managed-v0.2.12-4',hostRoot:join(appRoot,'host')}};
 }
 function prepareNode(f){try{linkSync(process.execPath,f.paths.node);}catch{copyFileSync(process.execPath,f.paths.node);}writeFileSync(join(f.paths.host,'server/private-file.mjs'),'export function makePrivateDir(){}');}
-function fakeHost(f,{busy=false,instance=false}={}){
-  writeFileSync(join(f.paths.host,'server/index.mjs'),`import http from 'node:http';import{writeFileSync}from'node:fs';import{join,dirname}from'node:path';let busy=${busy},instance=${instance};
+function fakeHost(f,{busy=false,instance=false,agentBusy=false}={}){
+  writeFileSync(join(f.paths.host,'server/index.mjs'),`import http from 'node:http';import{writeFileSync,readFileSync}from'node:fs';import{join,dirname}from'node:path';let busy=${busy},instance=${instance},agentBusy=${agentBusy};
+const chats=new Map(),folders=new Map(),workspaces=[];
 const native=()=>({available:true,instances:instance?[{id:'fixture-model',status:'ready',model:'user-choice'}]:[],jobs:[],capabilities:{componentUpdates:true}});
-const server=http.createServer((req,res)=>{let value;if(req.url==='/') {res.end('<div id="root"></div>');return;}if(req.url==='/api/native')value=native();else if(req.url==='/api/serving')value={stats:{running:0,waiting:0}};else if(req.url==='/api/update-maintenance')value={enabled:true,active:false,activeRequests:busy?1:0};else if(req.url==='/api/model-providers')value={connections:[]};else if(req.url==='/api/chats')value={chats:[]};else if(req.url==='/clear'){busy=false;value={ok:true};}else if(req.url==='/api/native/instances/fixture-model/unload'){instance=false;writeFileSync(join(process.env.STRATA_WORKSPACE,'unload.json'),JSON.stringify({token:req.headers['x-strata-updater']}));value={ok:true};}else{res.writeHead(404);res.end();return;}res.setHeader('content-type','application/json');res.end(JSON.stringify(value));});
+const lease=()=>{try{const data=JSON.parse(readFileSync(process.env.STRATA_UPDATE_MAINTENANCE_FILE,'utf8'));return data.expiresAt>Date.now()?data:null;}catch{return null;}};
+const server=http.createServer(async(req,res)=>{
+const current=lease(),url=new URL(req.url,'http://localhost'),path=url.pathname;
+if(current&&req.method==='POST'&&req.headers['x-strata-updater']!==current.id){res.writeHead(503);res.end();return;}
+let body='';for await(const chunk of req)body+=chunk;body=body?JSON.parse(body):{};
+let value;
+if(path==='/'){res.end('<div id="root"></div>');return;}
+if(path==='/api/native')value=native();
+else if(path==='/api/serving')value={stats:{running:0,waiting:0}};
+else if(path==='/api/update-maintenance')value={enabled:true,active:!!current,activeRequests:busy?1:0};
+else if(path==='/api/agent/status')value={state:'idle',activeTurns:agentBusy?1:0};
+else if(path==='/api/model-providers')value={connections:[]};
+else if(path==='/api/chats')value={chats:[...chats.values()]};
+else if(path.startsWith('/api/chats/')){const id=path.slice('/api/chats/'.length);if(req.method==='PUT'){chats.set(id,body);value={ok:true};}else if(chats.has(id))value={session:chats.get(id)};else{res.writeHead(404);res.end();return;}}
+else if(path==='/api/chat/folder'){if(req.method==='POST')folders.set(body.sessionId,{path:body.path});value={folder:folders.get(body.sessionId??url.searchParams.get('sessionId'))??null};}
+else if(path==='/api/workspaces'){if(req.method==='POST'){value={id:'ws'+workspaces.length,...body};workspaces.push(value);}else value={workspaces};}
+else if(path.startsWith('/api/workspaces/')){value=workspaces.find(w=>path.endsWith('/'+w.id));Object.assign(value,body);}
+else if(path==='/clear'){busy=false;agentBusy=false;value={ok:true};}
+else if(path==='/api/native/instances/fixture-model/unload'){instance=false;writeFileSync(join(process.env.STRATA_WORKSPACE,'unload.json'),JSON.stringify({token:req.headers['x-strata-updater']}));value={ok:true};}
+else if(path==='/api/control/shutdown'){
+if(req.headers['x-strata-shutdown']!==process.env.STRATA_SHUTDOWN_TOKEN){res.writeHead(403);res.end();return;}
+writeFileSync(join(dirname(process.env.STRATA_WORKSPACE),'shutdown.json'),JSON.stringify({guarded:!!current,token:req.headers['x-strata-updater']}));value={stopping:true};setTimeout(()=>process.exit(0),25);
+}else{res.writeHead(404);res.end();return;}
+res.setHeader('content-type','application/json');res.end(JSON.stringify(value));});
 writeFileSync(join(dirname(process.env.STRATA_WORKSPACE),'environment.json'),JSON.stringify(Object.fromEntries(Object.entries(process.env).filter(([k])=>k.startsWith('STRATA_')))));
 server.listen(Number(process.env.STRATA_PORT),'127.0.0.1');`);
   mkdirSync(join(f.dataRoot,'Workspace'),{recursive:true});
@@ -31,6 +55,7 @@ async function port(){const server=createServer();await new Promise(ok=>server.l
 test('fresh package routes every model, profile and component setting to its own user-data tree',()=>{
   const f=fixture(),old=process.env.STRATA_MANAGED_MODELS_CONFIG;process.env.STRATA_MANAGED_MODELS_CONFIG='C:/unrelated/private/models.json';
   try{const env=hostEnvironment(f.paths,f.active,8792);for(const key of ['STRATA_HOME','STRATA_DATA_DIR','STRATA_STATE_DIR','STRATA_COMPONENTS_DIR','STRATA_INSTALL_DIR','STRATA_PROFILE_DIR','STRATA_RUNTIME_DIR','STRATA_SETTINGS_FILE','STRATA_MODELS_DIR','STRATA_WORKSPACE'])assert(env[key].startsWith(f.dataRoot),key);assert.equal(env.STRATA_MANAGED_MODELS_CONFIG,undefined);assert.equal(env.STRATA_NO_ACQUIRE,'1');assert.equal(env.STRATA_CONTROL_DIR,f.paths.control);assert.equal(env.STRATA_UPDATE_MAINTENANCE_FILE,f.paths.maintenanceFile);
+    assert.equal(env.STRATA_HARNESS_DIR,join(f.appRoot,'resources/harness'));assert.equal(env.PATH.split(delimiter)[0],dirname(f.paths.node));assert.equal(Object.keys(env).filter(k=>k.toLowerCase()==='path').length,1);assert.equal(env.STRATA_SHUTDOWN_TOKEN,undefined);
     writeFileSync(join(f.dataRoot,'managed-models.json'),'{}');assert.equal(hostEnvironment(f.paths,f.active,8792).STRATA_MANAGED_MODELS_CONFIG,join(f.dataRoot,'managed-models.json'));
   }finally{if(old===undefined)delete process.env.STRATA_MANAGED_MODELS_CONFIG;else process.env.STRATA_MANAGED_MODELS_CONFIG=old;}
 });
@@ -48,6 +73,7 @@ test('a saved application may only be the bundled host or a verified host slot u
 });
 test('remote streams, native generation, queued requests and lifecycle jobs all block installer shutdown',()=>{
   assert(isBusy({jobs:[],instances:[]},{stats:{}},{activeRequests:1}));assert(isBusy({jobs:[{state:'running'}],instances:[]},{stats:{}},{}));assert(isBusy({jobs:[],instances:[{metrics:{live:{queued:1}}}]},{stats:{}},{}));assert(isBusy({jobs:[],instances:[]},{stats:{running:1}},{}));assert(!isBusy({jobs:[],instances:[]},{stats:{}},{activeRequests:0}));
+  assert(isBusy({jobs:[],instances:[]},{stats:{}},{activeRequests:0},{activeTurns:1}));
 });
 test('PID reuse, a foreign executable, altered creation time or an outside entry are never owned',()=>{
   const f=fixture(),record={pid:42,port:8792,entry:join(f.paths.host,'server/index.mjs'),executable:f.paths.node,created:'2026-11-08T00:00:00Z'},actual={pid:42,executable:f.paths.node,commandLine:'"'+f.paths.node+'" "'+record.entry+'"',created:record.created};
@@ -74,7 +100,14 @@ test('desktop launch returns a ready local window URL without starting a browser
     writeFileSync(f.paths.activeFile,JSON.stringify({...f.active,releaseId:99,releaseTag:latest.tag_name}));
     const notice=await main(['--desktop'],{...options,fetchRelease:async()=>latest});
     assert.equal(notice.pid,first.pid);assert.equal(notice.updateStatus,'current');assert.equal(notice.installedReleaseTag,'managed-v0.2.12-4');assert.equal(notice.latestInstallerTag,latest.tag_name);assert.equal(browserCalls,0);
+    const upgraded={version:'0.3.0',releaseId:100,tag_name:'managed-v0.3.0-1',installer:{name:'fixture-setup.exe'}};
+    const deferred=await main(['--desktop'],{...options,fetchRelease:async()=>upgraded});
+    assert.equal(deferred.pid,first.pid);assert.equal(deferred.updateStatus,'deferred-installer');assert.equal(deferred.latestInstallerTag,upgraded.tag_name);assert.equal(deferred.version,f.active.version);
+    const coding=await main(['--desktop','--coding','--coding-accept','--no-update'],options);
+    assert.match(new URL(coding.localUrl).hash,/^#\/chat\/managed-coding-[a-f0-9-]{36}$/);assert.equal(coding.pid,first.pid);assert.equal(browserCalls,0);
+    const reopened=await main(['--desktop','--coding','--no-update'],options);assert.equal(reopened.localUrl,coding.localUrl);
   }finally{await stopHost(f.paths);}
+  assert.equal(read(join(f.dataRoot,'shutdown.json')).guarded,true);assert(!existsSync(f.paths.maintenanceFile));
 });
 test('the real owned-host shutdown refuses a remote stream, then unloads and stops only that host', {skip:process.platform!=='win32',timeout:90000},async()=>{
   const f=fixture();prepareNode(f);fakeHost(f,{busy:true,instance:true});const chosen=await port(),entry=join(f.paths.host,'server/index.mjs');
@@ -83,8 +116,8 @@ test('the real owned-host shutdown refuses a remote stream, then unloads and sto
     let actual;for(let n=0;n<20&&!actual;n++){actual=await processIdentity(child.pid);if(!actual)await new Promise(ok=>setTimeout(ok,100));}
     const record={pid:child.pid,entry,port:chosen,executable:f.paths.node,created:actual.created};
     await assert.rejects(()=>stopHost(f.paths,{record}),/回答/);assert.doesNotThrow(()=>process.kill(child.pid,0));
-    await fetch(`http://127.0.0.1:${chosen}/clear`);await stopHost(f.paths,{record,token:'private-updater-token'});
-    assert.equal(read(join(f.dataRoot,'Workspace/unload.json')).token,'private-updater-token');assert.equal(await processIdentity(child.pid),null);
+    await fetch(`http://127.0.0.1:${chosen}/clear`);await stopHost(f.paths,{record});
+    assert.match(read(join(f.dataRoot,'Workspace/unload.json')).token,/^[a-f0-9-]{36}$/);assert.equal(await processIdentity(child.pid),null);assert(!existsSync(f.paths.maintenanceFile));
   }finally{if(child.exitCode===null)child.kill();}
 });
 test('Windows PowerShell CIM preserves Japanese and spaced process paths for owned-host shutdown', {skip:process.platform!=='win32',timeout:90000},async()=>{
@@ -96,4 +129,14 @@ test('Windows PowerShell CIM preserves Japanese and spaced process paths for own
     const record={pid:child.pid,entry,port:chosen,executable:f.paths.node,created:actual.created};assert(ownsProcess(f.paths,record,actual));
     await stopHost(f.paths,{record});assert.equal(await processIdentity(child.pid),null);
   }finally{if(child.exitCode===null)child.kill();}
+});
+
+test('a coding turn between model requests prevents shutdown until it finishes', {skip:process.platform!=='win32',timeout:90000},async()=>{
+  const f=fixture();prepareNode(f);fakeHost(f,{agentBusy:true});
+  const result=await main(['--desktop','--no-browser','--no-update'],{appRoot:f.appRoot,dataRoot:f.dataRoot});
+  try{
+    await assert.rejects(()=>stopHost(f.paths),/回答/);assert.doesNotThrow(()=>process.kill(result.pid,0));assert(!existsSync(f.paths.maintenanceFile));
+    await fetch(new URL('/clear',result.localUrl));await stopHost(f.paths);
+    assert.equal(await processIdentity(result.pid),null);assert.equal(read(join(f.dataRoot,'shutdown.json')).guarded,true);
+  }finally{try{process.kill(result.pid);}catch{}}
 });

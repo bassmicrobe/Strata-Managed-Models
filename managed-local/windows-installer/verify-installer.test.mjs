@@ -7,7 +7,21 @@ import {join} from 'node:path';
 import {createServer} from 'node:http';
 import {createModelProviders} from '../../apps/host/server/model-providers.mjs';
 import {createChatStore} from '../../apps/host/server/chat-store.mjs';
-import {exerciseInstalledProfile,runInstallerTest} from './verify-installer.mjs';
+import {exerciseInstalledProfile,runInstallerTest,waitForRemovedFiles} from './verify-installer.mjs';
+
+test('uninstall waits for every owned application tree after its temporary process takes over',async()=>{
+  const remaining=new Set(['launcher','resources','uninstaller']);let elapsed=0,polls=0;
+  await waitForRemovedFiles([...remaining],{timeoutMs:100,pollMs:10,exists:file=>remaining.has(file),now:()=>elapsed,sleep:async ms=>{
+    elapsed+=ms;polls++;remaining.delete(polls===1?'launcher':polls===2?'resources':'uninstaller');
+  }});
+  assert.equal(polls,3);assert.equal(elapsed,30);
+});
+
+test('uninstall waiting is bounded and reports the remaining application files',async()=>{
+  let elapsed=0;
+  await assert.rejects(waitForRemovedFiles(['resources'],{timeoutMs:20,pollMs:10,exists:()=>true,now:()=>elapsed,sleep:async ms=>{elapsed+=ms;}}),/did not finish.*resources/);
+  assert.equal(elapsed,20);
+});
 
 async function profileServer(directory,calls){
   const providers=createModelProviders({directory}),chats=createChatStore({dir:directory});
@@ -17,6 +31,7 @@ async function profileServer(directory,calls){
     try{
       assert.equal(req.headers['x-strata-client'],'installer-persistence-test');
       if(path==='/api/native')return send(200,{instances:[],capabilities:{componentUpdates:true}});
+      if(path==='/api/agent/status')return send(200,{state:'idle',harness:{version:'0.2.1-alpha.3'}});
       if(path==='/api/model-providers'&&req.method==='GET')return send(200,providers.list());
       const body=async()=>{let text='';for await(const part of req)text+=part;return text;};
       if(path==='/api/model-providers'&&req.method==='POST'){
@@ -45,7 +60,7 @@ test('installer persistence fixture uses real provider/chat stores, survives a r
     await exerciseInstalledProfile(server.port,{expected:fixture});
     assert.deepEqual(readFileSync(providerFile),providerBytes);assert.deepEqual(readFileSync(chatFile),chatBytes);
     assert.deepEqual(calls.filter(call=>!call.startsWith('GET ')),['POST /api/model-providers','PUT /api/chats/installer-persistence-fixture']);
-    assert(calls.every(call=>/^GET \/api\/(?:native|model-providers|chats\/installer-persistence-fixture)$/.test(call)||call==='POST /api/model-providers'||call==='PUT /api/chats/installer-persistence-fixture'));
+    assert(calls.every(call=>/^GET \/api\/(?:native|agent\/status|model-providers|chats\/installer-persistence-fixture)$/.test(call)||call==='POST /api/model-providers'||call==='PUT /api/chats/installer-persistence-fixture'));
   }finally{await server.stop();}
 });
 

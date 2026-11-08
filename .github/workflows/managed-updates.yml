@@ -47,6 +47,10 @@ jobs:
             choco install nsis --yes --no-progress
             if ($LASTEXITCODE -ne 0) { throw 'NSIS could not be installed.' }
           }
+          if (-not (Test-Path -LiteralPath 'C:\Program Files\7-Zip\7z.exe')) {
+            choco install 7zip --yes --no-progress
+            if ($LASTEXITCODE -ne 0) { throw '7-Zip could not be installed.' }
+          }
       - name: Prepare Rust for the desktop window
         shell: pwsh
         run: |

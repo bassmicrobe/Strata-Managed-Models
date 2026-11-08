@@ -137,6 +137,7 @@ fn open_window(app: &AppHandle, url: Url, smoke: bool) -> Result<()> {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RuntimeResult {
+    cancelled: Option<bool>,
     local_url: Option<String>,
     tailscale_url: Option<String>,
     update_status: Option<String>,
@@ -180,6 +181,7 @@ fn helper(app: &AppHandle, action: &'static str, args: &'static [&'static str]) 
         let _ = app.run_on_main_thread(move || {
             let state = ui.state::<State>(); state.busy.store(false, Ordering::Release);
             match result {
+                Ok(value) if value.cancelled == Some(true) => {},
                 Ok(_) if action == "quit" => ui.exit(0),
                 Ok(_) if action == "download" => {},
                 Ok(value) => {
@@ -191,7 +193,7 @@ fn helper(app: &AppHandle, action: &'static str, args: &'static [&'static str]) 
                         "update" => {
                             if prompt_update(&ui, value.installed_release_tag.zip(value.latest_installer_tag), true) { return; }
                             let release = value.release_tag.as_deref().unwrap_or("不明");
-                            let detail = match value.update_status.as_deref() { Some("applied") => "検証済みの更新を反映しました。", Some("deferred") => "処理中のため、更新は次回に回します。", Some("rollback" | "unavailable") => "更新を反映できませんでした。保存済みの版を使います。", _ => "現在の Windows 版は最新です。" };
+                            let detail = match value.update_status.as_deref() { Some("applied") => "検証済みの更新を反映しました。", Some("deferred") => "処理中のため、更新は次回に回します。", Some("deferred-installer") => "この更新には新しい Windows インストーラーが必要です。", Some("rollback" | "unavailable") => "更新を反映できませんでした。保存済みの版を使います。", _ => "現在の Windows 版は最新です。" };
                             message(&format!("{detail}\n現在の配布版: {release}"), false);
                         }
                         _ => {}
@@ -207,6 +209,7 @@ fn menu(app: &AppHandle, managed: bool) -> Result<()> {
     let submenu = Submenu::new(app, "Strata", true)?;
     for (id, label, enabled) in [
         ("chat", "チャット", true), ("models", "モデル", true), ("api", "API接続", true),
+        ("coding", "自動テストでコーディング", managed),
         ("share", "Tailscaleで共有", managed), ("copy", "共有URLをコピー", true),
         ("unshare", "Tailscale共有を停止", managed), ("update", "更新を確認", managed),
         ("quit", if managed { "Strataを終了" } else { "ウィンドウを閉じる" }, true),
@@ -231,6 +234,7 @@ fn menu_action(app: &AppHandle, action: &str) {
             else { message("Tailscale 共有は有効になっていません。", false); }
         }
         "share" => helper(app, "share", &["--tailscale"]),
+        "coding" => helper(app, "coding", &["--coding"]),
         "unshare" => helper(app, "unshare", &["--tailscale-off"]),
         "update" => helper(app, "update", &[]),
         "quit" if state.launcher.is_some() => helper(app, "quit", &["--stop", "--wait"]),

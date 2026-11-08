@@ -5,6 +5,7 @@ using System.IO;
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
+using System.Text.RegularExpressions;
 using System.Windows.Forms;
 using System.Web.Script.Serialization;
 
@@ -26,6 +27,15 @@ internal static class Launcher {
     }
     private static string Field(Dictionary<string, object> data, string key) {
         object value; return data != null && data.TryGetValue(key, out value) ? value as string : null;
+    }
+    private static bool CodingAccepted(string data) {
+        string path = Path.Combine(data, "coding.json");
+        if (!File.Exists(path)) return false;
+        var state = Json(File.ReadAllText(path));
+        object version;
+        if (state == null || !state.TryGetValue("consentVersion", out version) || Convert.ToInt32(version) != 1 || !Regex.IsMatch(Field(state, "chatId") ?? "", "^managed-coding-[a-f0-9-]{36}$"))
+            throw new IOException("自動テストの保存済み設定を確認できません。coding.json をバックアップから復元してください。");
+        return true;
     }
     private static void WriteStream(string value, bool error) {
         using (Stream stream = error ? Console.OpenStandardError() : Console.OpenStandardOutput()) {
@@ -63,8 +73,9 @@ internal static class Launcher {
         bool quiet = bridge || desktopSmoke;
         foreach (string arg in args) {
             if (arg == "--stop" || arg == "--smoke" || arg == "--no-browser") quiet = true;
-            if (arg != "--stop" && arg != "--wait" && arg != "--smoke" && arg != "--no-browser" && arg != "--models" && arg != "--api" && arg != "--tailscale" && arg != "--tailscale-off" && arg != "--desktop-bridge" && arg != "--desktop-smoke" && arg != "--quit" && !(bridge && arg == "--download-update")) return 2;
+            if (arg != "--stop" && arg != "--wait" && arg != "--smoke" && arg != "--no-browser" && arg != "--models" && arg != "--api" && arg != "--tailscale" && arg != "--tailscale-off" && arg != "--desktop-bridge" && arg != "--desktop-smoke" && arg != "--quit" && arg != "--coding" && !(bridge && arg == "--download-update")) return 2;
         }
+        if (Has(args, "--coding") && (Has(args, "--stop") || Has(args, "--quit") || Has(args, "--smoke") || Has(args, "--desktop-smoke") || Has(args, "--models") || Has(args, "--api") || Has(args, "--tailscale") || Has(args, "--tailscale-off") || Has(args, "--download-update"))) return 2;
         bool stopping = quit || Has(args, "--stop"), sharingOff = Has(args, "--tailscale-off");
         bool openWindow = desktopSmoke || !quiet && !stopping && !sharingOff;
         string root = AppDomain.CurrentDomain.BaseDirectory;
@@ -79,8 +90,21 @@ internal static class Launcher {
                 string node = Path.Combine(root, "resources", "node", "node.exe");
                 string script = Path.Combine(root, "runtime", "runtime.mjs");
                 if (!File.Exists(node) || !File.Exists(script)) throw new IOException("The application files are incomplete. Run the installer again.");
+                bool acceptCoding = false;
+                if (Has(args, "--coding") && !CodingAccepted(data)) {
+                    if (quiet && !bridge) throw new IOException("最初に Strata メニューの「自動テストでコーディング」から、実行権限を確認してください。");
+                    string consent = "専用チャットを作り、モデルによるプロジェクトの編集・テスト実行・失敗ログを使った修正と再実行を有効にします。\n\n" +
+                        "このチャットは ByPass モードです。操作ごとの承認を省略し、PC上でコマンドを実行できます。フォルダーの選択はOSのアクセス制限ではありません。\n\n" +
+                        "作業前に対象プロジェクトのフォルダーとモデルを選んでください。既存のチャットの権限やモデル設定は変えません。\n\nこの権限で専用チャットを作成しますか？";
+                    if (MessageBox.Show(consent, "自動テストでコーディング", MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2) != DialogResult.Yes) {
+                        if (bridge) WriteStream("{\"cancelled\":true}\n", false);
+                        return 0;
+                    }
+                    acceptCoding = true;
+                }
                 StringBuilder arguments = new StringBuilder(Quote(script));
                 foreach (string arg in args) if (arg != "--desktop-bridge" && arg != "--desktop-smoke" && arg != "--quit") arguments.Append(" ").Append(Quote(arg));
+                if (acceptCoding) arguments.Append(" --coding-accept");
                 if (quit) arguments.Append(" --stop --wait");
                 if (openWindow || bridge) arguments.Append(" --desktop");
                 if (desktopSmoke) arguments.Append(" --no-browser --no-update");

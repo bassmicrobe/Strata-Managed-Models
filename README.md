@@ -1,4 +1,6 @@
-> **Managed models & Tailscale fork**: use Strata in its own Windows window, switch added local/API models, and share the UI privately over Tailscale HTTPS. The Windows app alerts you when a verified installer update is available. [日本語README・Windowsの導入方法](README.ja.md) · [Tailscale経由の使い方](README.ja.md#tailscale) · [Original Strata](https://github.com/Niko1221/Strata)
+> **Managed models & Tailscale fork**. Use Strata in its own Windows window, switch added local/API models, and share the UI privately over Tailscale HTTPS. The Windows app alerts you when a verified installer update is available. [日本語README・Windowsの導入方法](README.ja.md) · [Tailscale経由の使い方](README.ja.md#tailscale) · [Original Strata](https://github.com/Niko1221/Strata)
+
+The Windows installer includes the coding agent. Choose **Strata → 自動テストでコーディング** to enable a dedicated coding chat that runs tests and uses failures to revise code and rerun tests. First use asks you to accept Bypass mode, which allows file changes and commands without approval prompts. Select your project folder and an added model that supports tool calls. Project-specific development tools and dependencies are required. [日本語の設定手順](managed-local/windows-installer/README.ja.md#自動テストでコーディング)
 
 ### Tailscaleで別のPC・スマートフォンから使う
 

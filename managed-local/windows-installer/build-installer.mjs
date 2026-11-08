@@ -4,6 +4,7 @@ import {createHash,randomUUID} from 'node:crypto';
 import {copyFileSync,cpSync,existsSync,lstatSync,mkdirSync,readFileSync,readdirSync,writeFileSync} from 'node:fs';
 import {dirname,isAbsolute,join,relative,resolve,sep} from 'node:path';
 import {fileURLToPath} from 'node:url';
+import {harnessDescriptor,stageHarness} from './harness-bundle.mjs';
 
 export const NODE_VERSION='24.12.0';
 export const NODE_ARCHIVE='node-v24.12.0-win-x64.zip';
@@ -49,7 +50,7 @@ export function collectLicenses(repoRoot,destination){
   const license=join(repoRoot,'LICENSE');if(!existsSync(license))throw Error('Strata LICENSE is missing.');
   copyFileSync(license,join(destination,'Strata-LICENSE.txt'));
   const host=join(repoRoot,'apps/host'),lock=JSON.parse(readFileSync(join(host,'package-lock.json'),'utf8'));
-  const notices=['# Third-party notices','','Strata: MIT. See Strata-LICENSE.txt.','Node.js: see resources/node/LICENSE.','Strata Control and its bundled Python packages: see resources/control and the included package metadata.',''];
+  const notices=['# Third-party notices','','Strata: MIT. See Strata-LICENSE.txt.','Node.js: see resources/node/LICENSE.','Strata Control and its bundled Python packages: see resources/control and the included package metadata.','DeepSeek Harness and its production dependencies: see resources/harness/LICENSE, resources/harness/THIRD_PARTY_NOTICES.md and the license files in resources/harness/node_modules.',''];
   let packages=0,files=0;
   for(const [path,entry] of Object.entries(lock.packages??{})){
     if(!path||entry.dev||!path.startsWith('node_modules/')||path.split('/').some(p=>p==='.'||p==='..'))continue;
@@ -66,29 +67,29 @@ export function collectLicenses(repoRoot,destination){
   }
   writeFileSync(join(destination,'THIRD-PARTY-NOTICES.md'),notices.join('\n')+'\n');return {packages,files};
 }
-async function controlAssetFallback(match,expected,{fetchImpl,token,initialFailure}){
+async function officialAssetFallback(match,expected,{fetchImpl,token,initialFailure}){
   const [url,tag,name]=match,base='https://api.github.com/repos/Niko1221/Strata',signal=AbortSignal.timeout(180000);
   const headers={accept:'application/vnd.github+json','x-github-api-version':'2022-11-28',...(token?{authorization:'Bearer '+token}:{})};
-  const request=async(address,options,phase)=>{try{return await fetchImpl(address,{...options,signal});}catch{throw Error(`${initialFailure}; official Control fallback failed at ${phase} (network request failed).`);}};
+  const request=async(address,options,phase)=>{try{return await fetchImpl(address,{...options,signal});}catch{throw Error(`${initialFailure}; official runtime fallback failed at ${phase} (network request failed).`);}};
   const metadata=await request(base+'/releases/tags/'+tag,{headers,redirect:'error'},'api.github.com release metadata');
-  if(!metadata.ok)throw Error(`${initialFailure}; official Control fallback metadata failed at api.github.com (HTTP ${metadata.status}).`);
+  if(!metadata.ok)throw Error(`${initialFailure}; official runtime fallback metadata failed at api.github.com (HTTP ${metadata.status}).`);
   const release=await metadata.json(),assets=release.assets?.filter(a=>a.name===name);
   const asset=assets?.length===1?assets[0]:null;
   if(release.tag_name!==tag||release.draft||release.prerelease||!asset||!Number.isSafeInteger(asset.id)||asset.id<=0
     ||!Number.isSafeInteger(asset.size)||asset.size<=0||asset.size>MAX_ARCHIVE||asset.browser_download_url!==url
-    ||asset.digest&&asset.digest!=='sha256:'+expected)throw Error('The official Control fallback asset metadata is invalid.');
+    ||asset.digest&&asset.digest!=='sha256:'+expected)throw Error('The official runtime fallback asset metadata is invalid.');
   let response=await request(base+'/releases/assets/'+asset.id,{headers:{...headers,accept:'application/octet-stream'},redirect:'manual'},'api.github.com asset API');
   if([301,302,303,307,308].includes(response.status)){
-    let target;try{target=new URL(response.headers.get('location'));if(target.protocol!=='https:'||target.hostname!=='release-assets.githubusercontent.com'||target.username||target.password)throw Error();}catch{throw Error('The official Control fallback asset redirect is invalid.');}
+    let target;try{target=new URL(response.headers.get('location'));if(target.protocol!=='https:'||target.hostname!=='release-assets.githubusercontent.com'||target.username||target.password)throw Error();}catch{throw Error('The official runtime fallback asset redirect is invalid.');}
     await response.body?.cancel();
     response=await request(target.href,{headers:{accept:'application/octet-stream'},redirect:'error'},'release-assets.githubusercontent.com asset CDN');
-    if(!response.ok)throw Error(`${initialFailure}; official Control fallback failed at release-assets.githubusercontent.com (HTTP ${response.status}).`);
-  }else if(!response.ok)throw Error(`${initialFailure}; official Control fallback failed at api.github.com asset API (HTTP ${response.status}).`);
+    if(!response.ok)throw Error(`${initialFailure}; official runtime fallback failed at release-assets.githubusercontent.com (HTTP ${response.status}).`);
+  }else if(!response.ok)throw Error(`${initialFailure}; official runtime fallback failed at api.github.com asset API (HTTP ${response.status}).`);
   return{response,size:asset.size};
 }
 export async function download(url,target,expected,{fetchImpl=fetch,token=process.env.GITHUB_TOKEN}={}){
   if(existsSync(target)&&sha(readFileSync(target))===expected)return;
-  const control=/^https:\/\/github\.com\/Niko1221\/Strata\/releases\/download\/(v\d+\.\d+\.\d+)\/(strata-control-\d+\.\d+\.\d+-windows-x86_64\.zip)$/.exec(url);
+  const control=/^https:\/\/github\.com\/Niko1221\/Strata\/releases\/download\/(v\d+\.\d+\.\d+)\/((?:strata-control-\d+\.\d+\.\d+-windows-x86_64\.zip)|(?:Strata-\d+\.\d+\.\d+-windows-x64-setup\.exe))$/.exec(url);
   let response,size,initialFailure;
   try{response=await fetchImpl(url,{signal:AbortSignal.timeout(control?30000:180000)});}catch{initialFailure=`Official runtime download failed at ${new URL(url).hostname} (network request failed)`;}
   if(response&&!response.ok)initialFailure=`Official runtime download failed at ${new URL(url).hostname} (HTTP ${response.status})`;
@@ -96,10 +97,10 @@ export async function download(url,target,expected,{fetchImpl=fetch,token=proces
     if(!control)throw Error(initialFailure+'.');
     await response?.body?.cancel();
     console.log(initialFailure+'; using the official GitHub asset API.');
-    ({response,size}=await controlAssetFallback(control,expected,{fetchImpl,token,initialFailure}));
+    ({response,size}=await officialAssetFallback(control,expected,{fetchImpl,token,initialFailure}));
   }
   const chunks=[];let total=0;for await(const chunk of response.body){total+=chunk.length;if(total>MAX_ARCHIVE)throw Error('The official runtime archive is larger than expected.');chunks.push(chunk);}
-  const bytes=Buffer.concat(chunks);if(size!==undefined&&bytes.length!==size)throw Error('The official Control archive size does not match its asset.');if(sha(bytes)!==expected)throw Error('The official runtime archive checksum does not match.');
+  const bytes=Buffer.concat(chunks);if(size!==undefined&&bytes.length!==size)throw Error('The official runtime archive size does not match its asset.');if(sha(bytes)!==expected)throw Error('The official runtime archive checksum does not match.');
   writeFileSync(target,bytes,{flag:'w'});
 }
 export async function controlDescriptor(version,{fetchImpl=fetch}={}){
@@ -178,7 +179,8 @@ async function buildDesktopWindow(repoRoot,stageBase,payload,run){
   const registry=process.env.CARGO_HOME??join(process.env.USERPROFILE??stageBase,'.cargo');
   const env={...process.env,CARGO_TARGET_DIR:target,CARGO_BUILD_JOBS:process.env.CARGO_BUILD_JOBS??'8',CARGO_ENCODED_RUSTFLAGS:[`--remap-path-prefix=${repoRoot}=/strata`,`--remap-path-prefix=${registry}=/cargo`].join('\x1f')};
   delete env.RUSTFLAGS;
-  const options={cwd:root,env,timeoutMs:1200000},base=['--locked','--release','--target',DESKTOP_TARGET,'--manifest-path',manifest];
+  // Direct Cargo releases must enable Tauri's production mode; its development context embeds the config folder.
+  const options={cwd:root,env,timeoutMs:1200000},base=['--locked','--release','--features','tauri/custom-protocol','--target',DESKTOP_TARGET,'--manifest-path',manifest];
   console.log('Building and testing the Rust desktop window.');
   await invoke(run,cargo,['test',...base],options);
   await invoke(run,cargo,['build',...base],options);
@@ -211,6 +213,11 @@ export async function buildWindowsInstaller({repoRoot,hostSourceRoot=repoRoot,ve
   for(const name of ['node.exe','LICENSE'])copyFileSync(join(nodeSource,name),join(nodeTarget,name));
   const controlSource=findControl(controlUnpacked);if(!existsSync(join(controlSource,'python/python.exe'))||!existsSync(join(controlSource,'strata_control')))throw Error('The official Control runtime is incomplete.');
   cpSync(controlSource,join(payload,'resources/control'),{recursive:true});
+  const harnessSource=await harnessDescriptor(version,{fetchImpl});
+  const harnessArchive=join(cache,harnessSource.archive);
+  await download(harnessSource.url,harnessArchive,harnessSource.sha256,{fetchImpl});
+  console.log('Staging the coding assistant from the verified official Windows installer.');
+  const harness=await stageHarness({archive:harnessArchive,work,destination:join(payload,'resources/harness'),node:join(nodeTarget,'node.exe'),run});
   const host=copyHost(join(hostSourceRoot,'apps/host'),join(payload,'host'));
   const runtimeSource=join(repoRoot,'managed-local/windows-installer/runtime');if(!existsSync(join(runtimeSource,'Launcher.cs'))||!existsSync(join(runtimeSource,'runtime.mjs')))throw Error('Portable launcher runtime sources are missing.');
   cpSync(runtimeSource,join(payload,'runtime'),{recursive:true,filter:file=>!file.endsWith('Launcher.cs')});
@@ -222,12 +229,12 @@ export async function buildWindowsInstaller({repoRoot,hostSourceRoot=repoRoot,ve
   const icon=join(repoRoot,'apps/desktop/src-tauri/icons/icon.ico');
   const csc=join(process.env.WINDIR||'C:/Windows','Microsoft.NET/Framework64/v4.0.30319/csc.exe');if(!existsSync(csc))throw Error('The Windows .NET Framework C# compiler is unavailable.');
   await invoke(run,csc,['/nologo','/codepage:65001','/target:winexe','/optimize+','/platform:x64','/reference:System.Windows.Forms.dll','/reference:System.Drawing.dll','/reference:System.Web.Extensions.dll',...(existsSync(icon)?['/win32icon:'+icon]:[]),'/out:'+join(payload,'StrataManaged.exe'),join(runtimeSource,'Launcher.cs')],{cwd:work});
-  const metadata={schema_version:1,product:PRODUCT,version,commit,releaseTag,nodeVersion:NODE_VERSION,controlVersion:control.version};writeFileSync(join(payload,'managed-install.json'),JSON.stringify(metadata,null,2));
+  const metadata={schema_version:1,product:PRODUCT,version,commit,releaseTag,nodeVersion:NODE_VERSION,controlVersion:control.version,harnessVersion:harness.version,harnessSourceVersion:version,harnessSourceSha256:harnessSource.sha256};writeFileSync(join(payload,'managed-install.json'),JSON.stringify(metadata,null,2));
   writeFileSync(join(payload,'.strata-managed-install'),'StrataManagedModels:5B157B33-47AD-43CC-8E0F-42F5F91D8290');
   const installer=join(outputDir,`Strata-Managed-Models-${version}-windows-x64-setup.exe`),template=join(HERE,'installer.nsi');
   await invoke(run,compiler,['/INPUTCHARSET','UTF8','/V3','/DVERSION='+version,'/DOUTFILE='+installer,'/DPAYLOAD='+payload,'/DWEBVIEW2_SETUP='+webview2,'/DESTIMATED_SIZE='+Math.ceil(payloadSize(payload)/1024),...(existsSync(icon)?['/DPRODUCT_ICON='+icon]:[]),template],{cwd:work,timeoutMs:600000});
   if(!existsSync(installer))throw Error('NSIS did not produce the installer.');
-  const bytes=readFileSync(installer),result={installer,sha256:sha(bytes),size:bytes.length,version,commit,releaseTag,payload,host,licenses,node:{version:NODE_VERSION,archiveSha256:NODE_SHA256},control:{version:control.version,archiveSha256:control.sha256}};
+  const bytes=readFileSync(installer),result={installer,sha256:sha(bytes),size:bytes.length,version,commit,releaseTag,payload,host,licenses,harness:{...harness,archive:harnessSource.archive,archiveSha256:harnessSource.sha256},node:{version:NODE_VERSION,archiveSha256:NODE_SHA256},control:{version:control.version,archiveSha256:control.sha256}};
   writeFileSync(join(outputDir,'installer-build.json'),JSON.stringify(result,null,2));return result;
 }
 
