@@ -4,6 +4,8 @@ import { createHash, randomUUID } from 'node:crypto';
 import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { buildWindowsInstaller } from './windows-installer/build-installer.mjs';
+import { verifyWindowsInstaller } from './windows-installer/verify-installer.mjs';
 
 export const FORK = 'bassmicrobe/Strata-Managed-Models';
 export const UPSTREAM = 'Niko1221/Strata';
@@ -166,17 +168,26 @@ export async function main() {
   await command(process.execPath, ['--test', 'managed-local/sync-and-release.test.mjs'], { cwd: root });
   await runNpm(['ci', '--ignore-scripts', '--no-audit', '--no-fund']);
   await runNpm(['run', 'typecheck']); await runNpm(['run', 'build']);
-  await command(process.execPath, ['--test', 'server/managed-local-models.test.mjs', 'tests/managed-models-client.test.mjs'], { cwd: host });
+  await command(process.execPath, ['--test', 'server/managed-local-models.test.mjs', 'server/update-maintenance.test.mjs', 'tests/managed-models-client.test.mjs', 'tests/native-picker.test.mjs', 'tests/model-picker.test.mjs'], { cwd: host });
+  const installerTests=readdirSync(join(root,'managed-local/windows-installer')).filter(name=>name.endsWith('.test.mjs')).map(name=>'managed-local/windows-installer/'+name);
+  if(installerTests.length)await command(process.execPath,['--test',...installerTests],{cwd:root});
   const files = await git(['ls-files', '-z', '--', 'apps/host', 'LICENSE', 'NOTICE', 'NOTICE.md']);
   const packaged = await packageHost(root, manifest, files);
+  const tag = `managed-v${latest.version}-${process.env.GITHUB_RUN_NUMBER}`;
+  console.log('Building and testing the standalone Windows installer.');
+  const installer=await buildWindowsInstaller({repoRoot:root,hostSourceRoot:root,version:latest.version,commit,releaseTag:tag,outputDir:join(packaged.output,'windows-installer')});
+  await verifyWindowsInstaller({installer:installer.installer,workRoot:join(packaged.output,'installer-test')});
+  const releaseManifest=readJson(packaged.manifestFile);
+  releaseManifest.installer={name:installer.installer.split(/[\\/]/).pop(),sha256:installer.sha256,size:installer.size};
+  writeFileSync(packaged.manifestFile,JSON.stringify(releaseManifest,null,2));
   // A normal push refuses concurrent branch changes; the workflow never force-pushes.
   await git(['push', 'origin', `HEAD:refs/heads/${branch}`]);
-  const tag = `managed-v${latest.version}-${process.env.GITHUB_RUN_NUMBER}`;
   const release = await github(`/repos/${FORK}/releases`, { method: 'POST', body: { tag_name: tag, target_commitish: commit,
     name: `Strata ${latest.version} · モデル切替版`, draft: true, prerelease: false,
-    body: `Strata ${latest.version} に、設定で有効にできるローカルモデル切替機能を追加した版です。\n\n上流: https://github.com/${UPSTREAM}/releases/tag/${latest.tag}\n上流コミット: ${upstreamCommit}\n切替版コミット: ${commit}\n\n型チェック、画面ビルド、モデル切替・更新ワークフローのテストを通過しました。GPUでの推論速度や回答品質を検証するCIではありません。モデル本体、APIキー、会話履歴は含みません。\n` } });
+    body: `Strata ${latest.version} のモデル切替版です。Windows用インストーラーはNodeとControlを同梱し、モデル未設定で起動します。モデルは画面から自由に追加し、追加済みモデルに応じてチャットの切替一覧が変わります。\n\n上流: https://github.com/${UPSTREAM}/releases/tag/${latest.tag}\n上流コミット: ${upstreamCommit}\n切替版コミット: ${commit}\n\n型チェック、画面ビルド、モデル切替・更新テスト、Windowsインストール・起動・再インストール・アンインストール時のユーザーデータ保持テストを通過しました。モデル本体、APIキー、会話履歴は配布物に含みません。\n` } });
   await upload(release.id, packaged.archive, ARCHIVE, 'application/zip');
   await upload(release.id, packaged.manifestFile, 'managed-host.json', 'application/json');
+  await upload(release.id,installer.installer,releaseManifest.installer.name,'application/vnd.microsoft.portable-executable');
   await github(`/repos/${FORK}/releases/${release.id}`, { method: 'PATCH', body: { draft: false } });
   console.log(`Published https://github.com/${FORK}/releases/tag/${tag}`);
 }

@@ -27,7 +27,7 @@ concurrency:
 jobs:
   update-and-release:
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
         with:
@@ -38,6 +38,13 @@ jobs:
           node-version: '24.12.0'
           cache: npm
           cache-dependency-path: apps/host/package-lock.json
+      - name: Prepare Windows installer compiler
+        shell: pwsh
+        run: |
+          if (-not (Test-Path -LiteralPath 'C:\Program Files (x86)\NSIS\makensis.exe')) {
+            choco install nsis --yes --no-progress
+            if ($LASTEXITCODE -ne 0) { throw 'NSIS could not be installed.' }
+          }
       - name: Merge, verify, and publish
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

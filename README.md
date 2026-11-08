@@ -1,4 +1,4 @@
-> **Managed model switching fork**: choose local models from the Strata chat header. Stable upstream releases are merged, tested and packaged automatically. [日本語の説明](managed-local/README.ja.md) · [Original Strata](https://github.com/Niko1221/Strata)
+> **Managed model switching fork**: choose local models from the Strata chat header. Stable upstream releases are merged, tested and packaged automatically. [日本語README・Windowsの導入方法](README.ja.md) · [Original Strata](https://github.com/Niko1221/Strata)
 
 <p align="center">
   <picture>

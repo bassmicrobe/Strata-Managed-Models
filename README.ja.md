@@ -1,3 +1,38 @@
+# Strata モデル切替版（Windows用インストーラー付き）
+
+このforkは、ユーザーが追加したモデルをチャット上部から切り替えられるStrataです。特定の3モデルには固定せず、Strata対応のローカルモデルやAPIモデルを自由に追加できます。
+
+## Windowsへのインストール
+
+1. [Releases](https://github.com/bassmicrobe/Strata-Managed-Models/releases/latest) から Windows x64用のsetup.exe をダウンロードします。
+2. インストーラーを実行します。管理者権限は不要です。Node.jsとStrata Controlを同梱しています。
+3. スタートメニューの **Strata Managed Models** を開き、初回のモデル画面で使いたいモデルを追加します。
+
+Windows 10／11の64ビット版が対象です。モデル本体は含めず、ユーザーが選んだときに取得します。既存の公式Strataとは別のアプリ・設定フォルダーを使います。
+
+## モデルの追加と切替
+
+- PC内で動かすモデルは「モデル」画面から導入・取り込みます。
+- 既存のモデルAPIは「設定 → Models／モデル」から接続を追加します。
+- 追加したモデルはチャット上部の選択メニューに反映されます。未読込のモデルは読み込み完了後に切り替わります。
+- モデルの切替でチャット履歴を消す必要はありません。モデルごとの量子化・コンテキストなどは保存設定を使います。
+
+[詳しい日本語の使い方](managed-local/windows-installer/README.ja.md) はインストーラーにも同梱しています。
+
+## 更新と管理
+
+このforkの管理ブランチは managed-models です。大元の安定版を毎時確認し、取り込み・テスト・画面ビルド・Windowsインストーラー試験に合格した版だけを公開します。起動時は、その検証済み配布版を確認します。
+
+競合や検証エラーがあれば前の配布版を使います。アンインストール時にも、設定・会話履歴・モデルは保持します。
+
+- [forkの運用説明](managed-local/README.ja.md)
+- [自動検証の結果](https://github.com/bassmicrobe/Strata-Managed-Models/actions/workflows/managed-updates.yml)
+- [公式Strataの日本語README](https://github.com/Niko1221/Strata/blob/main/README.ja.md)
+
+---
+
+## 以下は上流Strataの日本語説明です
+
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="apps/host/public/brand/strata-lockup-dark.svg">

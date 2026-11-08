@@ -87,6 +87,7 @@ import { findFreePort, listenProblem } from './ports.mjs';
 import { validateChatImages } from './chat-images.mjs';
 import { createTimeSkip, measureFolder, timeskipRevisionMessage, imageTypeOf } from './timeskip.mjs';
 import { createManagedLocalModels } from './managed-local-models.mjs';
+import { createUpdateMaintenance } from './update-maintenance.mjs';
 
 const HERE = fileURLToPath(new URL('.', import.meta.url));
 const ROOT = resolve(HERE, '..');
@@ -190,6 +191,7 @@ function withPictureAnswers(list) {
 }
 // This machine's opt-in lifecycle gateway keeps the existing provider ID so saved chats still resolve.
 const managedModels = createManagedLocalModels({ changed: value => hub.send('managed-models', value), log: line => console.log(line) });
+const updateMaintenance = createUpdateMaintenance();
 if (managedModels.enabled) {
   const baseUrl = `http://127.0.0.1:${PORT}/api/managed-models/v1`;
   const registration = managedModels.providerRegistration(baseUrl);
@@ -992,6 +994,7 @@ const server = http.createServer(async (req, res) => {
       const origin = new URL(req.headers.origin);
       if (!['localhost', '127.0.0.1', '[::1]'].includes(origin.hostname)) return error(res, 403, 'Open the local Strata app to use host controls.');
     }
+    if (updateMaintenance.handle(req, res, path, method)) return;
     if (path.startsWith('/api/')) {
       const modelOperation = !['GET', 'OPTIONS'].includes(method) && /^\/api\/(models|local-models|runtime|image-models|engine|native)(\/|$)/.test(path) && !['/api/runtime/plan', '/api/engine/validate', '/api/local-models/inspect'].includes(path);
       if (modelOperation) modelOperations++;

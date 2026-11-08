@@ -4,15 +4,21 @@
 
 `managed-models` がこのforkの管理ブランチです。上流は [Niko1221/Strata](https://github.com/Niko1221/Strata) です。上流の安定版を毎時確認し、新しい版を取り込んでから型チェック、画面ビルド、モデル切替のテストを実行します。合格した版だけが、このforkのReleasesに公開されます。競合や検証エラーがあれば公開を止め、最後に合格したリリースを残します。
 
+## Windows用インストーラー
+
+[Releases](https://github.com/bassmicrobe/Strata-Managed-Models/releases/latest) のWindows x64セットアップEXEを使います。NodeとControlを同梱し、モデル未設定で起動します。ユーザーが追加したローカルモデルとAPIモデルが切替一覧に反映されます。[日本語の使い方](windows-installer/README.ja.md) を同梱しています。
+
 ## PCで使うとき
 
 PCの起動ファイルは、このforkの合格済みリリースを確認します。新しい版は別フォルダーで準備し、保存済みのモデル接続とチャットを使えることを起動確認してから切り替えます。回答やモデル読み込みの途中なら、更新を次回の起動へ回します。
 
-推論エンジンとControlの更新は、公式Strataの署名付き配布に従います。画像リーダーなど互換性のために固定している補助ファイルと、各モデルの32K・1チャットの設定はPC側で管理します。
+推論エンジンとControlの更新は、公式Strataの署名付き配布に従います。インストーラーの標準構成では、モデルごとの設定をPC側に保存します。既存の専用3モデル環境では、32K・1チャットの調整値と画像リーダーなどの補助ファイルを引き継ぎます。
 
-このリポジトリと配布ZIPに、モデル本体、APIキー、会話履歴、PCごとの実行パスは含めません。モデル切替には、PC側で用意したPowerShell起動スクリプトと `STRATA_MANAGED_MODELS_CONFIG` が必要です。
+このリポジトリと配布ZIPに、モデル本体、APIキー、会話履歴、PCごとの実行パスは含めません。インストーラーの標準構成は、画面からモデルとAPI接続を追加して使えます。既存の専用起動スクリプトを使う構成では、必要に応じてSTRATA_MANAGED_MODELS_CONFIGを設定します。
 
 ## 配布物
+
+- Windows用セットアップEXE: Node、Control、起動アプリ、日本語READMEを同梱。
 
 - `managed-host-windows-x64.zip`: Nodeホスト、画面のビルド、ソース、テスト、組み込み識別ファイル。
 - `managed-host.json`: forkと上流のコミット、対象機能、ZIPのサイズ・SHA-256。

@@ -1,6 +1,7 @@
 import { tr } from '../lib/i18n';
 /** Settings panels share the existing preference controls. */
-import { useRef, type ReactNode } from 'react';
+import { useEffect, useRef, type ReactNode } from 'react';
+import { useLocation } from '../lib/router';
 import { Btn, Field, Icon, Select, type IconName } from '../components/ui';
 import { Brand } from '../components/Brand';
 import { SettingsModels } from '../components/SettingsModels';
@@ -17,6 +18,12 @@ import { setLanguage, setWhileBusy } from '../lib/store';
 import { CONTENT_FONT_RANGE, setContentFontSize, setDensity, setFocus, setMotion, setShortcuts, setTheme, setTransparency, setUiScale, UI_SCALES, useStore, setSettingsSection } from '../lib/store';
 const PANELS = [{ name: 'Appearance', icon: 'sun', sections: ['General', 'Reading & focus'] }, { name: 'Models', icon: 'models', sections: [] }, { name: 'Tools', icon: 'tool', sections: [] }, { name: 'Storage', icon: 'disk', sections: ['Storage'] }, { name: 'Engine', icon: 'engine', sections: [] }, { name: 'About', icon: 'info', sections: ['About', 'Update', 'Privacy'] }] as const;
 export function SettingsScreen() {
+    const location = useLocation();
+    const requested = location.query.get('section');
+    useEffect(() => {
+        const panel = PANELS.find(item => item.name === requested);
+        if (panel) setSettingsSection(panel.name);
+    }, [requested]);
     const prefs = useStore(s => s);
     const [shell, saveShell] = useShellState();
     const active = prefs.settingsSection;
