@@ -7,7 +7,29 @@ import {join} from 'node:path';
 import {createServer} from 'node:http';
 import {createModelProviders} from '../../apps/host/server/model-providers.mjs';
 import {createChatStore} from '../../apps/host/server/chat-store.mjs';
-import {exerciseInstalledProfile,runInstallerTest,waitForRemovedFiles} from './verify-installer.mjs';
+import {cleanPcEnvironment,exerciseInstalledProfile,runInstallerTest,waitForRemovedFiles} from './verify-installer.mjs';
+
+test('the clean-PC fixture removes every inherited ProgramFiles alias and PATH casing without changing its source',()=>{
+  const source={SYSTEMROOT:'C:/Windows',PROGRAMFILES:'optional-upper',ProgramFiles:'optional-title',programfiles:'optional-lower',PROGRAMW6432:'optional-64',ProgramW6432:'optional-64-title','PROGRAMFILES(X86)':'optional-32',PATH:'developer-upper',Path:'developer-title',path:'developer-lower',KEEP:'retained'};
+  const saved={...source},root=join(tmpdir(),'strata-clean-pc'),env=cleanPcEnvironment(source,root);
+  assert.deepEqual(source,saved);assert.equal(env.KEEP,'retained');
+  for(const name of ['ProgramFiles','ProgramFiles(x86)','ProgramW6432']){
+    assert.deepEqual(Object.keys(env).filter(key=>key.toLowerCase()===name.toLowerCase()),[name]);
+    assert.equal(env[name],join(root,'without-optional-powershell'));
+  }
+  assert.deepEqual(Object.keys(env).filter(key=>key.toLowerCase()==='path'),['PATH']);
+  assert.equal(env.ProgramFiles,join(root,'without-optional-powershell'));
+  assert.equal(env.PATH,[join(source.SYSTEMROOT,'System32'),join(source.SYSTEMROOT,'System32/WindowsPowerShell/v1.0')].join(';'));
+});
+
+test('a real Windows child cannot reconstruct optional PowerShell paths from CI casing or ProgramW6432',{skip:process.platform!=='win32'},()=>{
+  const root=mkdtempSync(join(tmpdir(),'strata-clean-pc-'));
+  const inherited={...process.env,PROGRAMFILES:'ci-optional-powershell',ProgramFiles:'local-optional-powershell',programfiles:'other-optional-powershell',PROGRAMW6432:'ci-optional-64',ProgramW6432:'optional-64','PROGRAMFILES(X86)':'ci-optional-32',PATH:'ci-developer-path',Path:'other-developer-path'};
+  const env=cleanPcEnvironment(inherited,root);
+  const child=JSON.parse(execFileSync(process.execPath,['-e',"process.stdout.write(JSON.stringify({programFiles:process.env.ProgramFiles,programW6432:process.env.ProgramW6432,programFilesX86:process.env['ProgramFiles(x86)'],path:process.env.PATH}))"],{env,windowsHide:true,encoding:'utf8'}));
+  for(const key of ['programFiles','programW6432','programFilesX86'])assert.equal(child[key],join(root,'without-optional-powershell'));
+  assert.equal(child.path,env.PATH);
+});
 
 test('uninstall waits for every owned application tree after its temporary process takes over',async()=>{
   const remaining=new Set(['launcher','resources','uninstaller']);let elapsed=0,polls=0;

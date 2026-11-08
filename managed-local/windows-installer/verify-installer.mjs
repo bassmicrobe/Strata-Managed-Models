@@ -4,6 +4,18 @@ import {spawn} from 'node:child_process';
 import {existsSync,mkdirSync,readFileSync,writeFileSync,realpathSync} from 'node:fs';
 import {basename,dirname,join,resolve,relative,isAbsolute} from 'node:path';
 const wait=ms=>new Promise(done=>setTimeout(done,ms));
+export function cleanPcEnvironment(source,workRoot){
+  const env={...source};
+  const systemRoot=source[Object.keys(source).find(key=>key.toLowerCase()==='systemroot')]??'C:/Windows';
+  // Node passes only the first case-insensitive environment match. Windows also
+  // rebuilds a child's ProgramFiles from ProgramW6432, so isolate every spelling
+  // and architecture alias instead of letting CI's PowerShell 7 leak back in.
+  const aliases=['path','programfiles','programfiles(x86)','programw6432'];
+  for(const key of Object.keys(env))if(aliases.includes(key.toLowerCase()))delete env[key];
+  for(const key of ['ProgramFiles','ProgramFiles(x86)','ProgramW6432'])env[key]=join(workRoot,'without-optional-powershell');
+  env.PATH=[join(systemRoot,'System32'),join(systemRoot,'System32/WindowsPowerShell/v1.0')].join(';');
+  return env;
+}
 export async function waitForRemovedFiles(paths,{timeoutMs=240000,pollMs=250,exists=existsSync,sleep=wait,now=Date.now}={}){
   const deadline=now()+timeoutMs;
   for(;;){
@@ -133,9 +145,7 @@ export async function verifyWindowsInstaller({installer,workRoot,run=runInstalle
   const app=join(workRoot,'app 日本語'),data=join(workRoot,'user-data 日本語');mkdirSync(data,{recursive:true});
   const installLog=join(workRoot,'install.log'),env={...process.env,STRATA_MANAGED_DATA_DIR:data,STRATA_MANAGED_INSTALL_LOG:installLog};
   // Model a receiving PC with neither a system Node install nor optional PowerShell 7.
-  const hostEnv={...env,ProgramFiles:join(workRoot,'without-optional-powershell')};
-  for(const key of Object.keys(hostEnv))if(key.toLowerCase()==='path')delete hostEnv[key];
-  hostEnv.PATH=[join(process.env.SystemRoot,'System32'),join(process.env.SystemRoot,'System32/WindowsPowerShell/v1.0')].join(';');
+  const hostEnv=cleanPcEnvironment(env,workRoot);
   const phase=name=>console.log('[installer-test] '+name);
   const diagnostics=()=>{if(existsSync(installLog))console.error(readFileSync(installLog,'utf8').slice(-16000));};
   phase('Checking the isolated user registration');
