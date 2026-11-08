@@ -22,7 +22,7 @@ internal static class Launcher {
     private static int Main(string[] args) {
         bool quiet = false;
         foreach (string arg in args) {
-            if (arg == "--stop" || arg == "--smoke") quiet = true;
+            if (arg == "--stop" || arg == "--smoke" || arg == "--no-browser") quiet = true;
             if (arg != "--stop" && arg != "--wait" && arg != "--smoke" && arg != "--no-browser" && arg != "--models" && arg != "--api") return 2;
         }
         string root = AppDomain.CurrentDomain.BaseDirectory;

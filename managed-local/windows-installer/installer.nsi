@@ -22,6 +22,15 @@ SetCompressor /SOLID lzma
 !define UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\StrataManagedModels"
 !define OWNER_MARKER "StrataManagedModels:5B157B33-47AD-43CC-8E0F-42F5F91D8290"
 !macro Fail Message
+  ReadEnvStr $R8 STRATA_MANAGED_INSTALL_LOG
+  ${If} $R8 != ""
+    ClearErrors
+    FileOpen $R9 "$R8" a
+    ${IfNot} ${Errors}
+      FileWrite $R9 "${Message}$\r$\n"
+      FileClose $R9
+    ${EndIf}
+  ${EndIf}
   MessageBox MB_OK|MB_ICONSTOP "${Message}" /SD IDOK
   SetErrorLevel 1
   Abort
@@ -100,6 +109,7 @@ Function ${Prefix}CheckTree
       Call ${Prefix}CheckTree
     ${EndIf}
     FindNext $2 $3
+    IfErrors treeClose
     Goto treeScan
   treeClose:
     FindClose $2
@@ -170,6 +180,7 @@ Function CheckInstallTarget
         !insertmacro Fail "The selected folder is not empty. Choose a new folder for this application."
       ${EndIf}
       FindNext $0 $1
+      IfErrors scanDone
       Goto scan
     scanDone:
       FindClose $0

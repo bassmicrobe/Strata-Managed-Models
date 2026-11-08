@@ -50,3 +50,15 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           INPUT_FORCE: ${{ inputs.force || false }}
         run: node managed-local/sync-and-release.mjs
+      - name: Retain installer diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer-diagnostics
+          retention-days: 7
+          if-no-files-found: ignore
+          path: |
+            ${{ runner.temp }}/strata-managed-*/windows-installer/*setup.exe
+            ${{ runner.temp }}/strata-managed-*/installer-test/install.log
+            ${{ runner.temp }}/strata-managed-*/installer-test/user-data/smoke-result.json
+            ${{ runner.temp }}/strata-managed-*/installer-test/user-data/logs/*.log
