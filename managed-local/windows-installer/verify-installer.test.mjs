@@ -1,12 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtempSync,readFileSync} from 'node:fs';
+import {copyFileSync,existsSync,mkdtempSync,readFileSync,writeFileSync} from 'node:fs';
+import {execFileSync} from 'node:child_process';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {createServer} from 'node:http';
 import {createModelProviders} from '../../apps/host/server/model-providers.mjs';
 import {createChatStore} from '../../apps/host/server/chat-store.mjs';
-import {exerciseInstalledProfile} from './verify-installer.mjs';
+import {exerciseInstalledProfile,runInstallerTest} from './verify-installer.mjs';
 
 async function profileServer(directory,calls){
   const providers=createModelProviders({directory}),chats=createChatStore({dir:directory});
@@ -55,4 +56,36 @@ test('a retained marker cannot hide missing user-selected models after restart',
     await assert.rejects(exerciseInstalledProfile(server.port,{expected:fixture}),/Saved API connection disappeared/);
     assert.deepEqual(JSON.parse(readFileSync(join(directory,'chats',fixture.session.id+'.json'))).session,fixture.session);
   }finally{await server.stop();}
+});
+
+test('a Windows GUI launcher returns while its background Node remains alive, and inherited capture pipes have a bounded drain',{
+  skip:process.platform!=='win32'||!existsSync('C:/Windows/Microsoft.NET/Framework64/v4.0.30319/csc.exe'),timeout:20000,
+},async t=>{
+  const root=mkdtempSync(join(tmpdir(),'strata-installer-pipes-')),source=join(root,'Fixture.cs'),launcher=join(root,'StrataManaged.exe'),captured=join(root,'CapturedFixture.exe'),script=join(root,'keep-background-alive.js');
+  const pidFiles=[];
+  t.after(()=>{for(const path of pidFiles){if(!existsSync(path))continue;const pid=Number(readFileSync(path,'utf8'));if(Number.isSafeInteger(pid)&&pid>0){try{process.kill(pid);}catch{}}}});
+  writeFileSync(script,'setInterval(() => {}, 1000);');
+  writeFileSync(source,`using System; using System.Diagnostics; using System.IO;
+internal static class Fixture {
+  [STAThread] private static int Main(string[] args) {
+    var start = new ProcessStartInfo(args[0], "\\\"" + args[1] + "\\\"");
+    start.UseShellExecute = false; start.CreateNoWindow = true; start.WindowStyle = ProcessWindowStyle.Hidden;
+    using (var child = Process.Start(start)) { File.WriteAllText(args[2], child.Id.ToString()); }
+    Console.Out.Write("fixture-wrapper-exited"); return 0;
+  }
+}`);
+  execFileSync('C:/Windows/Microsoft.NET/Framework64/v4.0.30319/csc.exe',['/nologo','/target:winexe','/out:'+launcher,source],{windowsHide:true,stdio:'pipe'});
+  copyFileSync(launcher,captured);
+  for(const [file,name,capture] of [[launcher,'ignored',false],[captured,'captured',true]]){
+    const pidFile=join(root,name+'.pid');pidFiles.push(pidFile);const start=Date.now();
+    const result=await runInstallerTest(file,[process.execPath,script,pidFile],{cwd:root,timeoutMs:5000});
+    assert(Date.now()-start<5000,'The launcher test waited for a persistent descendant to close its handles.');
+    assert(existsSync(pidFile));const pid=Number(readFileSync(pidFile,'utf8'));assert.doesNotThrow(()=>process.kill(pid,0),'The background fixture must still be alive when its launcher returns.');
+    if(capture)assert.equal(result.stdout,'fixture-wrapper-exited');else assert.deepEqual(result,{stdout:'',stderr:''});
+  }
+});
+
+test('captured registry helpers preserve their output and failed helpers report the executable and exit code',{skip:process.platform!=='win32'},async()=>{
+  assert.equal((await runInstallerTest('powershell.exe',['-NoLogo','-NoProfile','-Command','[Console]::Out.Write("registry-path-marker")'],{timeoutMs:10000})).stdout,'registry-path-marker');
+  await assert.rejects(runInstallerTest('powershell.exe',['-NoLogo','-NoProfile','-Command','exit 7'],{timeoutMs:10000}),error=>error.code===7&&/powershell\.exe exited with code 7/.test(error.message));
 });

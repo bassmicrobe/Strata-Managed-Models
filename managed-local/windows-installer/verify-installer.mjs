@@ -6,10 +6,29 @@ import {basename,join,resolve,relative,isAbsolute} from 'node:path';
 const wait=ms=>new Promise(done=>setTimeout(done,ms));
 export function runInstallerTest(file,args,{cwd,env,timeoutMs=180000,verbatim=false}={}){
   return new Promise((ok,bad)=>{
-    const child=spawn(file,args,{cwd,env,windowsHide:true,windowsVerbatimArguments:verbatim,shell:false,stdio:['ignore','pipe','pipe']});
-    let stdout='',stderr='';child.stdout.on('data',b=>{stdout=(stdout+b).slice(-16000);});child.stderr.on('data',b=>{stderr=(stderr+b).slice(-16000);});
-    let timedOut=false;const timer=setTimeout(()=>{timedOut=true;child.kill();},timeoutMs);
-    child.once('error',error=>{clearTimeout(timer);bad(error);});child.once('close',code=>{clearTimeout(timer);code===0?ok({stdout,stderr}):bad(Object.assign(Error(`The Windows installer lifecycle test failed: ${basename(file)} exited with code ${code??'unknown'}${timedOut?' (timed out)':''}.`),{detail:stdout+stderr,code,timedOut}));});
+    // The GUI launcher exits after starting the persistent host. Its descendants must not
+    // inherit capture pipes and hold this test open after the launcher has already exited.
+    const capture=basename(file).toLowerCase()!=='stratamanaged.exe';
+    const child=spawn(file,args,{cwd,env,windowsHide:true,windowsVerbatimArguments:verbatim,shell:false,stdio:capture?['ignore','pipe','pipe']:'ignore'});
+    let stdout='',stderr='',settled=false,timedOut=false,timer,drainTimer,killTimer;
+    child.stdout?.on('data',b=>{stdout=(stdout+b).slice(-16000);});child.stderr?.on('data',b=>{stderr=(stderr+b).slice(-16000);});
+    const closePipes=()=>{child.stdout?.destroy();child.stderr?.destroy();};
+    const finish=(code,error)=>{
+      if(settled)return;settled=true;clearTimeout(timer);clearTimeout(drainTimer);clearTimeout(killTimer);
+      if(error){closePipes();bad(Object.assign(Error(`The Windows installer lifecycle test failed: ${basename(file)} could not start (${error.code??'unknown'}).`),{detail:stdout+stderr,code:error.code,cause:error}));}
+      else if(code===0&&!timedOut)ok({stdout,stderr});
+      else bad(Object.assign(Error(`The Windows installer lifecycle test failed: ${basename(file)} exited with code ${code??'unknown'}${timedOut?' (timed out)':''}.`),{detail:stdout+stderr,code,timedOut}));
+    };
+    timer=setTimeout(()=>{timedOut=true;child.kill();killTimer=setTimeout(()=>{closePipes();finish(child.exitCode);},2000);},timeoutMs);
+    child.once('error',error=>finish(undefined,error));
+    child.once('exit',code=>{
+      clearTimeout(timer);
+      if(!capture){finish(code);return;}
+      // Usually close follows exit immediately and preserves all output. A captured helper
+      // that spawned a background process still has a bounded pipe-drain period.
+      drainTimer=setTimeout(()=>{closePipes();finish(code);},2000);
+    });
+    child.once('close',code=>finish(code));
   });
 }
 export async function exerciseInstalledProfile(port,{expected,fetchImpl=fetch}={}){
@@ -44,7 +63,7 @@ export async function verifyWindowsInstaller({installer,workRoot,run=runInstalle
   const diagnostics=()=>{if(existsSync(installLog))console.error(readFileSync(installLog,'utf8').slice(-16000));};
   phase('Checking the isolated user registration');
   const registry=await run('powershell.exe',['-NoLogo','-NoProfile','-Command',String.raw`$p=Get-ItemProperty -LiteralPath 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\StrataManagedModels' -ErrorAction SilentlyContinue; if($p){$p.InstallLocation}; exit 0`],{cwd:workRoot,env});
-  const existing=registry.stdout?.trim();if(existing){const rel=relative(realpathSync(workRoot),resolve(existing));if(rel.startsWith('..')||isAbsolute(rel))throw Error('A real installation is already registered. Use a clean test account.');}
+  const existing=registry.stdout?.trim();if(existing){const target=existsSync(existing)?realpathSync(existing):resolve(existing),rel=relative(realpathSync(workRoot),target);if(rel.startsWith('..')||isAbsolute(rel))throw Error('A real installation is already registered. Use a clean test account.');}
   const invokeSetup=async name=>{phase(name);try{return await run(installer,['/S','/D='+app],{cwd:workRoot,env,timeoutMs:240000,verbatim:true});}catch(error){diagnostics();throw error;}};
   await invokeSetup('Installing into the isolated test folder');
   for(const path of ['StrataManaged.exe','runtime/runtime.mjs','resources/node/node.exe','resources/control/python/python.exe','host/server/index.mjs','host/dist/index.html','README.ja.txt'])assert(existsSync(join(app,path)),'Missing installed file: '+path);
