@@ -57,12 +57,12 @@ export async function exerciseInstalledProfile(port,{expected,fetchImpl=fetch}={
 export async function verifyWindowsInstaller({installer,workRoot,run=runInstallerTest}={}){
   if(process.platform!=='win32'||!isAbsolute(installer??'')||!isAbsolute(workRoot??''))throw Error('The Windows installer test needs absolute Windows paths.');
   workRoot=resolve(workRoot);mkdirSync(workRoot,{recursive:true});
-  const app=join(workRoot,'app'),data=join(workRoot,'user-data');mkdirSync(data,{recursive:true});
+  const app=join(workRoot,'app 日本語'),data=join(workRoot,'user-data 日本語');mkdirSync(data,{recursive:true});
   const installLog=join(workRoot,'install.log'),env={...process.env,STRATA_MANAGED_DATA_DIR:data,STRATA_MANAGED_INSTALL_LOG:installLog};
   const phase=name=>console.log('[installer-test] '+name);
   const diagnostics=()=>{if(existsSync(installLog))console.error(readFileSync(installLog,'utf8').slice(-16000));};
   phase('Checking the isolated user registration');
-  const registry=await run('powershell.exe',['-NoLogo','-NoProfile','-Command',String.raw`$p=Get-ItemProperty -LiteralPath 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\StrataManagedModels' -ErrorAction SilentlyContinue; if($p){$p.InstallLocation}; exit 0`],{cwd:workRoot,env});
+  const registry=await run('powershell.exe',['-NoLogo','-NoProfile','-Command',String.raw`[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); $p=Get-ItemProperty -LiteralPath 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\StrataManagedModels' -ErrorAction SilentlyContinue; if($p){$p.InstallLocation}; exit 0`],{cwd:workRoot,env});
   const existing=registry.stdout?.trim();if(existing){const target=existsSync(existing)?realpathSync(existing):resolve(existing),rel=relative(realpathSync(workRoot),target);if(rel.startsWith('..')||isAbsolute(rel))throw Error('A real installation is already registered. Use a clean test account.');}
   const invokeSetup=async name=>{phase(name);try{return await run(installer,['/S','/D='+app],{cwd:workRoot,env,timeoutMs:240000,verbatim:true});}catch(error){diagnostics();throw error;}};
   await invokeSetup('Installing into the isolated test folder');

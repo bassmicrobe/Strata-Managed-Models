@@ -8,8 +8,8 @@ import {createServer} from 'node:net';
 import {layout,hostEnvironment,releaseIsNew,bundledIsNewer,validateActive,isBusy,ownsProcess,processIdentity,main,stopHost} from './runtime/runtime.mjs';
 
 const read=file=>JSON.parse(readFileSync(file,'utf8'));
-function fixture(){
-  const root=mkdtempSync(join(tmpdir(),'strata-managed-runtime-')),appRoot=join(root,'app'),dataRoot=join(root,'data');
+function fixture({unicode=false}={}){
+  const root=mkdtempSync(join(tmpdir(),'strata-managed-runtime-')),appRoot=join(root,unicode?'app 日本語':'app'),dataRoot=join(root,unicode?'data 日本語':'data');
   for(const path of ['host/server','host/dist','resources/node','resources/control/python'])mkdirSync(join(appRoot,path),{recursive:true});
   mkdirSync(dataRoot,{recursive:true});
   writeFileSync(join(appRoot,'host/server/index.mjs'),'// fixture');writeFileSync(join(appRoot,'host/dist/index.html'),'<div id="root"></div>');
@@ -55,7 +55,7 @@ test('PID reuse, a foreign executable, altered creation time or an outside entry
 });
 test('the CIM query accepts only a numeric process identity and does not expose failed output',async()=>{
   let called=0;assert.equal(await processIdentity('42; malicious',{run:async()=>{called++;}}),null);assert.equal(called,0);
-  const value=await processIdentity(42,{run:async(file,args)=>{assert.equal(file,'powershell.exe');assert(args.at(-1).includes('ProcessId = 42'));return '{"pid":42,"created":"checked"}';}});assert.equal(value.pid,42);assert.equal(await processIdentity(42,{run:async()=>{throw Error('private details');}}),null);
+  const value=await processIdentity(42,{run:async(file,args)=>{assert.equal(file,'powershell.exe');assert(args.at(-1).includes('ProcessId = 42'));assert(args.at(-1).startsWith('[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false);'));return '{"pid":42,"created":"checked"}';}});assert.equal(value.pid,42);assert.equal(await processIdentity(42,{run:async()=>{throw Error('private details');}}),null);
 });
 test('the real bundled-Node smoke starts an empty isolated host, records success, and leaves no process', {skip:process.platform!=='win32',timeout:90000},async()=>{
   const f=fixture();prepareNode(f);fakeHost(f);
@@ -71,5 +71,15 @@ test('the real owned-host shutdown refuses a remote stream, then unloads and sto
     await assert.rejects(()=>stopHost(f.paths,{record}),/回答/);assert.doesNotThrow(()=>process.kill(child.pid,0));
     await fetch(`http://127.0.0.1:${chosen}/clear`);await stopHost(f.paths,{record,token:'private-updater-token'});
     assert.equal(read(join(f.dataRoot,'Workspace/unload.json')).token,'private-updater-token');assert.equal(await processIdentity(child.pid),null);
+  }finally{if(child.exitCode===null)child.kill();}
+});
+test('Windows PowerShell CIM preserves Japanese and spaced process paths for owned-host shutdown', {skip:process.platform!=='win32',timeout:90000},async()=>{
+  const f=fixture({unicode:true});prepareNode(f);fakeHost(f);const chosen=await port(),entry=join(f.paths.host,'server/index.mjs');
+  const child=spawn(f.paths.node,[entry],{windowsHide:true,stdio:'ignore',env:hostEnvironment(f.paths,f.active,chosen)});
+  try{
+    let actual;for(let n=0;n<20&&!actual;n++){actual=await processIdentity(child.pid);if(!actual)await new Promise(ok=>setTimeout(ok,100));}
+    assert(actual,'The Unicode process must be visible to CIM.');assert.equal(actual.executable.toLowerCase(),f.paths.node.toLowerCase());assert(actual.commandLine.includes('app 日本語'));
+    const record={pid:child.pid,entry,port:chosen,executable:f.paths.node,created:actual.created};assert(ownsProcess(f.paths,record,actual));
+    await stopHost(f.paths,{record});assert.equal(await processIdentity(child.pid),null);
   }finally{if(child.exitCode===null)child.kill();}
 });

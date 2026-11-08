@@ -43,7 +43,7 @@ export function isBusy(native,serving,maintenance){return !!(maintenance?.active
 function command(file,args,timeout=15000){return new Promise((ok,bad)=>{execFile(file,args,{encoding:'utf8',windowsHide:true,timeout,maxBuffer:1024*1024},(err,stdout)=>err?bad(fail('Windows could not complete the application operation.')):ok(stdout));});}
 export async function processIdentity(pid,{run=command}={}){
   if(!Number.isSafeInteger(pid)||pid<=0)return null;
-  const script=`$p=Get-CimInstance Win32_Process -Filter 'ProcessId = ${pid}' -ErrorAction Stop;if($p){[pscustomobject]@{pid=$p.ProcessId;executable=$p.ExecutablePath;commandLine=$p.CommandLine;created=$p.CreationDate.ToUniversalTime().ToString('o')}|ConvertTo-Json -Compress}`;
+  const script=`[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false);$p=Get-CimInstance Win32_Process -Filter 'ProcessId = ${pid}' -ErrorAction Stop;if($p){[pscustomobject]@{pid=$p.ProcessId;executable=$p.ExecutablePath;commandLine=$p.CommandLine;created=$p.CreationDate.ToUniversalTime().ToString('o')}|ConvertTo-Json -Compress}`;
   try{const value=(await run('powershell.exe',['-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-Command',script])).trim();return value?JSON.parse(value):null;}catch{return null;}
 }
 export function ownsProcess(paths,record,actual){
