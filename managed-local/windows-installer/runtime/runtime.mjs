@@ -80,21 +80,23 @@ async function startHost(paths,active,{profile=paths.profile,smoke=false}={}){
   catch(error){if(child.exitCode===null)child.kill();throw error;}
 }
 async function waitExit(pid){for(let i=0;i<150;i++){if(!await processIdentity(pid))return;await sleep(100);}throw fail('Strata is still closing. Try again in a moment.');}
-export async function stopHost(paths,{token,record}={}){
-  record??=await ownedRecord(paths);if(!record)return;
+export async function stopHost(paths,{token,record,modelsOnly=false}={}){
+  record??=await ownedRecord(paths);
+  if(!record){if(modelsOnly)throw fail('Strataの実行状態を確認できません。画面を開き直してください。');return;}
   if(!token){
     const before=await snapshot(record);
     if(isBusy(before.native,before.serving,before.maintenance,before.agent))throw fail('回答やモデルの処理が終わってから、もう一度お試しください。');
     if(before.maintenance.active)throw fail('Strataの更新処理が終わってから、もう一度お試しください。');
     const id=randomUUID(),renew=()=>atomicJson(paths.maintenanceFile,{pid:process.pid,id,reason:'stop',expiresAt:Date.now()+120000});renew();
     const timer=setInterval(renew,20000);timer.unref();
-    try{return await stopHost(paths,{record,token:id});}
+    try{return await stopHost(paths,{record,token:id,modelsOnly});}
     finally{clearInterval(timer);try{if(json(paths.maintenanceFile).id===id)unlinkSync(paths.maintenanceFile);}catch{}}
   }
   const current=await snapshot(record);
   if(!current.maintenance.enabled||!current.maintenance.active)throw fail('Strata could not guard the shutdown. Try again after updating the app.');
   if(isBusy(current.native,current.serving,current.maintenance,current.agent))throw fail('回答やモデルの処理が終わってから、もう一度お試しください。');
-  for(const instance of current.native.instances)if(instance.status!=='error')await request(record,`/api/native/instances/${encodeURIComponent(instance.id)}/unload`,{method:'POST',token});
+  for(const instance of current.native.instances)if(modelsOnly||instance.status!=='error')await request(record,`/api/native/instances/${encodeURIComponent(instance.id)}/unload`,{method:'POST',token});
+  if(modelsOnly)return;
   if(!ownsProcess(paths,record,await processIdentity(record.pid)))throw fail('The Strata process changed while closing.');
   if(record.shutdownToken){
     const response=await fetch(`http://127.0.0.1:${record.port}/api/control/shutdown`,{method:'POST',headers:{'x-strata-client':'strata-managed-launcher','x-strata-shutdown':record.shutdownToken,...(token?{'x-strata-updater':token}:{})},signal:AbortSignal.timeout(5000)});
@@ -153,14 +155,16 @@ async function restartForSharing(paths,active,record){
 }
 async function openBrowser(url){await command('powershell.exe',['-NoLogo','-NoProfile','-NonInteractive','-Command',`Start-Process '${url.replace(/'/g,"''")}'`]);}
 export async function main(args=process.argv.slice(2),options={}){
+  if(args.includes('--stop-models')&&args.some(arg=>!['--stop-models','--desktop','--no-browser'].includes(arg)))throw fail('Choose one launcher action.');
   if(args.includes('--coding-accept')&&!args.includes('--coding'))throw fail('Automatic coding consent requires --coding.');
   if(args.includes('--coding')&&args.some(arg=>['--stop','--smoke','--models','--api','--tailscale','--tailscale-off','--download-update'].includes(arg)))throw fail('Choose one launcher action.');
-  if(args.some(arg=>!['--stop','--wait','--smoke','--no-browser','--no-update','--desktop','--models','--api','--tailscale','--tailscale-off','--download-update','--coding','--coding-accept'].includes(arg))||args.includes('--tailscale')&&args.includes('--tailscale-off')||args.includes('--smoke')&&(args.includes('--tailscale')||args.includes('--tailscale-off'))||args.includes('--download-update')&&args.some(arg=>!['--download-update','--desktop','--no-browser'].includes(arg)))throw fail('Unknown launcher option.');
+  if(args.some(arg=>!['--stop','--stop-models','--wait','--smoke','--no-browser','--no-update','--desktop','--models','--api','--tailscale','--tailscale-off','--download-update','--coding','--coding-accept'].includes(arg))||args.includes('--tailscale')&&args.includes('--tailscale-off')||args.includes('--smoke')&&(args.includes('--tailscale')||args.includes('--tailscale-off'))||args.includes('--download-update')&&args.some(arg=>!['--download-update','--desktop','--no-browser'].includes(arg)))throw fail('Unknown launcher option.');
   const paths=layout(options);if(!existsSync(paths.node)||!existsSync(join(paths.control,'python/python.exe')))throw fail('The bundled runtime is incomplete. Run the installer again.');
   const showBrowser=options.openBrowser??openBrowser,checkRelease=options.fetchRelease??fetchForkRelease;
   await makePrivate(paths);mkdirSync(join(paths.dataRoot,'logs'),{recursive:true});
   const log=message=>writeFileSync(join(paths.dataRoot,'logs/launcher.log'),new Date().toISOString()+' '+message+'\n',{flag:'a',mode:0o600});
   if(args.includes('--stop')){await stopHost(paths);return{stopped:true};}
+  if(args.includes('--stop-models')){await stopHost(paths,{modelsOnly:true});return{modelsStopped:true};}
   if(!args.includes('--smoke'))try{refreshCodingPolicy(paths);}catch(error){if(args.includes('--coding'))throw error;log('自動テストの指示を更新できませんでした。保存済みの指示を確認してください。');}
   const metadata=json(join(paths.appRoot,'managed-install.json'));
   const bundled=validateActive(paths,{version:metadata.version,commit:metadata.commit,releaseTag:metadata.releaseTag,hostRoot:paths.host});

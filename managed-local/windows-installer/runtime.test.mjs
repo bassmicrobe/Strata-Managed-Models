@@ -120,6 +120,27 @@ test('the real owned-host shutdown refuses a remote stream, then unloads and sto
     assert.match(read(join(f.dataRoot,'Workspace/unload.json')).token,/^[a-f0-9-]{36}$/);assert.equal(await processIdentity(child.pid),null);assert(!existsSync(f.paths.maintenanceFile));
   }finally{if(child.exitCode===null)child.kill();}
 });
+test('stop-models refuses active inference, then unloads the models while the same host keeps serving', {skip:process.platform!=='win32',timeout:90000},async()=>{
+  const f=fixture();prepareNode(f);fakeHost(f,{busy:true,instance:true});
+  const options={appRoot:f.appRoot,dataRoot:f.dataRoot};
+  const running=await main(['--desktop','--no-browser','--no-update'],options);
+  const endpoint=path=>new URL(path,running.localUrl);
+  try{
+    await assert.rejects(()=>main(['--stop-models','--desktop'],options),/回答/);
+    assert.equal((await (await fetch(endpoint('/api/native'))).json()).instances.length,1);
+    assert(!existsSync(join(f.dataRoot,'Workspace/unload.json')));
+    await fetch(endpoint('/clear'));
+    assert.deepEqual(await main(['--stop-models','--desktop'],options),{modelsStopped:true});
+    assert.match(read(join(f.dataRoot,'Workspace/unload.json')).token,/^[a-f0-9-]{36}$/);
+    assert.deepEqual((await (await fetch(endpoint('/api/native'))).json()).instances,[]);
+    assert.equal((await processIdentity(running.pid))?.pid,running.pid);
+    assert(!existsSync(join(f.dataRoot,'shutdown.json')));
+    assert(!existsSync(f.paths.maintenanceFile));
+  }finally{
+    await fetch(endpoint('/clear')).catch(()=>{});
+    await stopHost(f.paths);
+  }
+});
 test('Windows PowerShell CIM preserves Japanese and spaced process paths for owned-host shutdown', {skip:process.platform!=='win32',timeout:90000},async()=>{
   const f=fixture({unicode:true});prepareNode(f);fakeHost(f);const chosen=await port(),entry=join(f.paths.host,'server/index.mjs');
   const child=spawn(f.paths.node,[entry],{windowsHide:true,stdio:'ignore',env:hostEnvironment(f.paths,f.active,chosen)});

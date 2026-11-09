@@ -70,8 +70,11 @@ internal static class Launcher {
     [STAThread]
     private static int Main(string[] args) {
         bool bridge = Has(args, "--desktop-bridge"), desktopSmoke = Has(args, "--desktop-smoke"), quit = Has(args, "--quit");
-        bool quiet = bridge || desktopSmoke;
+        bool modelsOnly = Has(args, "--stop-models");
+        bool quiet = bridge || desktopSmoke || modelsOnly;
         foreach (string arg in args) {
+            if (modelsOnly && arg != "--stop-models" && arg != "--desktop-bridge" && arg != "--no-browser") return 2;
+            if (arg == "--stop-models") continue;
             if (arg == "--stop" || arg == "--smoke" || arg == "--no-browser") quiet = true;
             if (arg != "--stop" && arg != "--wait" && arg != "--smoke" && arg != "--no-browser" && arg != "--models" && arg != "--api" && arg != "--tailscale" && arg != "--tailscale-off" && arg != "--desktop-bridge" && arg != "--desktop-smoke" && arg != "--quit" && arg != "--coding" && !(bridge && arg == "--download-update")) return 2;
         }

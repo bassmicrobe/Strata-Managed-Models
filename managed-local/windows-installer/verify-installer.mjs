@@ -193,6 +193,12 @@ export async function verifyWindowsInstaller({installer,workRoot,run=runInstalle
     await installedApi(port,'/api/chats/'+coding.state.chatId,{method:'PUT',body:coding.chat});
     await configureCoding(false);await inspectInstalledCoding(port,{data,expected:coding});
     await exerciseInstalledProfile(port,{expected:fixture});
+    phase('Stopping models through the installed desktop launcher while keeping its host');
+    const beforeStop=JSON.parse(readFileSync(join(data,'host-process.json'),'utf8'));
+    const modelStop=await run(launcher,['--stop-models','--desktop-bridge'],{cwd:app,env:hostEnv,timeoutMs:120000});
+    assert.deepEqual(JSON.parse(modelStop.stdout),{modelsStopped:true});
+    assert.equal(JSON.parse(readFileSync(join(data,'host-process.json'),'utf8')).pid,beforeStop.pid);
+    await exerciseInstalledProfile(port,{expected:fixture});
     phase('Opening the installed WebView2 window without an external browser');
     try{await run(launcher,['--desktop-smoke'],{cwd:app,env,timeoutMs:150000});}
     catch(error){for(const file of ['logs/desktop-window.log','logs/desktop-launcher.log','logs/launcher.log'])if(existsSync(join(data,file)))console.error(readFileSync(join(data,file),'utf8').slice(-12000));throw error;}
