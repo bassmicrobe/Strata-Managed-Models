@@ -27,9 +27,9 @@ export async function waitForRemovedFiles(paths,{timeoutMs=240000,pollMs=250,exi
 }
 export function runInstallerTest(file,args,{cwd,env,timeoutMs=180000,verbatim=false}={}){
   return new Promise((ok,bad)=>{
-    // The GUI launcher exits after starting the persistent host. Its descendants must not
-    // inherit capture pipes and hold this test open after the launcher has already exited.
-    const capture=basename(file).toLowerCase()!=='stratamanaged.exe';
+    // Normal GUI launches must not leave capture pipes held open by the persistent host.
+    // A desktop bridge action has a JSON response that the caller must read.
+    const capture=basename(file).toLowerCase()!=='stratamanaged.exe'||args.includes('--desktop-bridge');
     const child=spawn(file,args,{cwd,env,windowsHide:true,windowsVerbatimArguments:verbatim,shell:false,stdio:capture?['ignore','pipe','pipe']:'ignore'});
     let stdout='',stderr='',settled=false,timedOut=false,timer,drainTimer,killTimer;
     child.stdout?.on('data',b=>{stdout=(stdout+b).slice(-16000);});child.stderr?.on('data',b=>{stderr=(stderr+b).slice(-16000);});
