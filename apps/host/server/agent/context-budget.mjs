@@ -133,7 +133,30 @@ function balancedBefore(messages, i) {
  */
 export function splitMessages(messages, budget, density = 1) {
   const room = Math.max(512, budget);
-  const sized = messages.map(m => clipMessage(m, Math.floor(room * 0.8), density));
+  const sized = messages.flatMap(message => {
+    const limit = Math.floor(room * 0.8);
+    if (estimateMessage(message) * density <= limit) return [message];
+    const content = message?.content;
+    if (!['user', 'assistant'].includes(message?.role) || !Array.isArray(content) ||
+      !content.length || content.some(b => !['text', 'reasoning'].includes(b?.type) || typeof b.text !== 'string')) {
+      return [clipMessage(message, limit, density)];
+    }
+    // A giant old prompt must not lose facts in its middle when summarized.
+    // Split text-only messages losslessly; tool-call/result groups retain the
+    // existing balanced handling and explicit clipping notice when necessary.
+    const chars = Math.max(128, Math.floor((limit / density - 32) * CHARS_PER_TOKEN));
+    return content.flatMap(block => {
+      const pieces = [];
+      for (let at = 0; at < block.text.length;) {
+        let end = Math.min(block.text.length, at + chars);
+        // Never send one half of a UTF-16 surrogate pair to the tokenizer.
+        if (end < block.text.length && /[\uD800-\uDBFF]/.test(block.text[end - 1]) && /[\uDC00-\uDFFF]/.test(block.text[end])) end--;
+        pieces.push({ ...message, content: [{ ...block, text: block.text.slice(at, end) }] });
+        at = end;
+      }
+      return pieces;
+    });
+  });
   const cost = sized.map(m => estimateMessage(m) * density);
   const runs = [];
   let start = 0, used = 0;

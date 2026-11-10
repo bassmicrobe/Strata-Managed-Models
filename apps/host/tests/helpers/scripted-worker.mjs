@@ -37,7 +37,7 @@ import { createHash } from 'node:crypto';
 
 const delay = ms => new Promise(r => setTimeout(r, ms));
 
-export async function startScriptedWorker({ port = 0, chunkDelayMs = 40, model = 'scripted-model', serial = false, window = 0, charsPerToken = 0, noCount = false } = {}) {
+export async function startScriptedWorker({ port = 0, chunkDelayMs = 40, model = 'scripted-model', serial = false, window = 0, charsPerToken = 0, noCount = false, summaryNeedsThinkingOff = false, summaryMaxChars = 0 } = {}) {
   // `window` + `charsPerToken` make it behave like the engine: every request's prompt is counted (its size over charsPerToken), the usage it
   // reports is that count, and a prompt that leaves no room to answer is refused with the engine's own 400 ("requests are never truncated").
   // `serial` stands in for an engine with one request slot: the next request waits until the one before it has finished.
@@ -119,7 +119,16 @@ export async function startScriptedWorker({ port = 0, chunkDelayMs = 40, model =
     };
 
     // Recovery fixtures must recognise the summary request before the original directive it quotes.
-    if (messages.some(m => /evolving goals/.test(text(m)))) { requests.at(-1).summary = true; return say(['Summary of the earlier conversation: the person asked for echoes of a word and got them.']); }
+    if (messages.some(m => /evolving goals/.test(text(m)))) {
+      requests.at(-1).summary = true;
+      if ((summaryNeedsThinkingOff && body.chat_template_kwargs?.enable_thinking !== false) ||
+        (summaryMaxChars > 0 && raw.length > summaryMaxChars)) {
+        requests.at(-1).summaryTruncated = true;
+        send({ role: 'assistant', content: '', reasoning_content: 'The auxiliary request used all its remaining token allowance.' });
+        return finish('length', 2048);
+      }
+      return say(['Summary of the earlier conversation: the person asked for echoes of a word and got them.']);
+    }
     const contextContinueAt = messages.findLastIndex(m => m.role === 'user' && /^Continue the unfinished request from the compacted conversation\./.test(text(m)));
     if (contextContinueAt >= 0 && contextContinueAt > messages.findLastIndex(m => m.role === 'user' && /SCRIPT:/.test(text(m)))) {
       requests.at(-1).contextContinued = true;
@@ -129,6 +138,10 @@ export async function startScriptedWorker({ port = 0, chunkDelayMs = 40, model =
       promptTokens = parseInt((directive[2] ?? '').trim(), 10) || 32000;
       send({ role: 'assistant', content: '', reasoning_content: 'The context filled before I could answer.' });
       return finish('stop', 20);
+    }
+    if (directive?.[1] === 'contextready') {
+      promptTokens = parseInt((directive[2] ?? '').trim(), 10) || 112000;
+      return say(['READY']);
     }
 
     // A model that read "[sandbox: escalation available ...]" retries the exact call once with the narrowest wider mode.

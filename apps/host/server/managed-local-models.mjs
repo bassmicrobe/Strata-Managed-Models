@@ -268,7 +268,7 @@ export function createManagedLocalModels({ configPath = process.env.STRATA_MANAG
       vision: m.vision !== false, reasoning: m.reasoning !== false,
       architecture: { input_modalities: m.vision === false ? ['text'] : ['text', 'image'], output_modalities: ['text'] },
     })) });
-    if (subpath !== 'chat/completions' || req.method !== 'POST') return json(res, 404, { error: { message: 'Unknown managed inference endpoint.' } });
+    if (!['chat/completions', 'messages/count_tokens'].includes(subpath) || req.method !== 'POST') return json(res, 404, { error: { message: 'Unknown managed inference endpoint.' } });
     if (maintenance()) return json(res, 503, { error: { message: 'Strataを更新しています。完了後にもう一度お試しください。' } });
     let body;
     try { body = await readBody(req, 32 * 1024 * 1024); } catch { return json(res, 400, { error: { message: 'The chat request must be valid JSON under 32 MB.' } }); }
@@ -289,7 +289,7 @@ export function createManagedLocalModels({ configPath = process.env.STRATA_MANAG
         try {
           await ensure(m);
           if (controller.signal.aborted) return;
-          const upstream = await fetchImpl(m.baseUrl + '/chat/completions', { method: 'POST', headers: backendHeaders(m),
+          const upstream = await fetchImpl(m.baseUrl + '/' + subpath, { method: 'POST', headers: backendHeaders(m),
             body: JSON.stringify(body), redirect: 'error', signal: controller.signal });
           if (!upstream.body) throw failure('モデルから空の応答が返りました。', 502);
           res.writeHead(upstream.status, { 'content-type': upstream.headers.get('content-type') ?? 'application/json; charset=utf-8',

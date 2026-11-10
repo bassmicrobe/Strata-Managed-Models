@@ -177,14 +177,21 @@ function splitText(text, limit) {
  */
 export function createChatCompactor({ fetchImpl = fetch, dataDir, report = () => {}, privateDir = makePrivateDir,
   maxEntries = 64, maxSummaryRequests = 32, timeoutMs = 180000, counterTimeoutMs = 8000, summaryTimeoutMs = 55000 } = {}) {
-  const directory = dataDir ? join(dataDir, 'chat-compaction') : null;
-  if (directory) { mkdirSync(directory, { recursive: true, mode: 0o700 }); privateDir(directory); }
+  const record = event => { try { report(event); } catch { /* diagnostics do not stop a usable response */ } };
+  let directory = dataDir ? join(dataDir, 'chat-compaction') : null;
+  if (directory) {
+    try { mkdirSync(directory, { recursive: true, mode: 0o700 }); privateDir(directory); }
+    catch {
+      // Cache availability must not stop the host, and an ACL failure must not write private summaries into an unprotected folder.
+      directory = null;
+      record({ status: 'compaction-cache-unavailable' });
+    }
+  }
   const cache = new Map(), locks = new Map();
   const remember = (scope, item) => {
     cache.delete(scope); cache.set(scope, item);
     while (cache.size > Math.max(1, maxEntries)) cache.delete(cache.keys().next().value);
   };
-  const record = event => { try { report(event); } catch { /* diagnostics do not stop a usable response */ } };
   const load = scope => {
     if (cache.has(scope)) return cache.get(scope);
     if (!directory) return null;

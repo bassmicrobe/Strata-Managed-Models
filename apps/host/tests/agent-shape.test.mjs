@@ -27,7 +27,7 @@ test('only the Expert settings that differ from their defaults are sent; the thi
   assert.equal(shapeBody({ ...body, max_tokens: 100 }, { sampling: { max_tokens: 500 } }).max_tokens, 100);
   assert.equal(shapeBody({ ...body, temperature: 1 }, { sampling: { temperature: 0.2 } }).temperature, 1, 'a field the request already has wins');
   assert.equal(shapeBody({ ...body, chat_template_kwargs: { enable_thinking: false } }, { budget: 8192 }).reasoning_budget_tokens, undefined, 'thinking off: no budget');
-  assert.deepEqual(BUDGETS, [2048, 8192, 32768]); assert.equal(nearestBudget(0), 0); assert.equal(nearestBudget(5000), 2048); assert.equal(nearestBudget(7000), 8192); assert.equal(nearestBudget('32768'), 32768);
+  assert.deepEqual(BUDGETS, [2048, 4096, 8192, 32768]); assert.equal(nearestBudget(0), 0); assert.equal(nearestBudget(4096), 4096); assert.equal(nearestBudget(5000), 4096); assert.equal(nearestBudget(7000), 8192); assert.equal(nearestBudget('32768'), 32768);
 });
 
 test('only this computer and private networks are shaped, never a cloud address', () => {
@@ -45,7 +45,7 @@ test('the profile adds a response-settings copy of each shapeable route (local, 
     proxyBase: 'http://127.0.0.1:8791/api/internal/agent-llm',
   });
   const local = profile.routes.find(r => r.kind === 'local');
-  assert.deepEqual(Object.keys(local.shaped), ['0', '2048', '8192', '32768']);
+  assert.deepEqual(Object.keys(local.shaped), ['0', '2048', '4096', '8192', '32768']);
   assert.equal(local.shaped[8192], 'strata-local~s8192');
   assert.deepEqual(Object.keys(profile.shapeTargets).sort(), [...Object.values(local.shaped), ...Object.values(profile.routes.find(r => r.connectionId === 'lan').shaped)].sort());
   assert.equal(profile.shapeTargets['strata-local~s0'], 'http://127.0.0.1:9001');
@@ -116,6 +116,9 @@ test('a turn uses the response-settings route only when a setting is changed: th
   await run('s4', { thinking: 'High', thinkingBudget: 8192 });
   assert.equal(last().reasoning_budget_tokens, 8192, 'the composer budget reaches the request');
   assert.equal(last().chat_template_kwargs.reasoning_effort, 'high');
+  await run('s4096', { thinking: 'Medium', thinkingBudget: 4096 });
+  assert.equal(last().reasoning_budget_tokens, 4096, '4096 reaches the actual model request without rounding down to 2048');
+  assert.equal(last().chat_template_kwargs.enable_thinking, true);
   await run('s5', { thinking: 'Off', thinkingBudget: 8192 });
   assert.equal(last().reasoning_budget_tokens, undefined, 'a budget is not sent while thinking is off');
   expert = { temperature: 0.2, top_k: 12, seed: 5 };

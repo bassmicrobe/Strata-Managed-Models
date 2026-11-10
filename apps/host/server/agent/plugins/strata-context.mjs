@@ -32,9 +32,10 @@ const wrapped = new WeakSet();
 /** Densities that made a summary request fail on this server, per session id (the next request starts from a more careful one). */
 const careful = new Map();
 
-export function apply(ctx) {
+export function apply(ctx, config = {}) {
   const meter = ctx.tokenMeter;
   const llm = ctx.llm;
+  const summaryProviders = new Set(config.summaryProviders ?? []);
   const log = (level, text) => { try { ctx.logger?.[level]?.(`strata-context: ${text}`); } catch { /* logging never blocks */ } };
 
   // 1. The measured size of the prompt, from the model server's own report for each answer.
@@ -151,9 +152,16 @@ export function apply(ctx) {
     return { text, finish, chunks };
   }
   const refusedForSize = finish => finish?.kind === 'error' && isContextOverflow(finish.failure ?? finish);
+  const incompleteSummary = finish => refusedForSize(finish) || finish?.kind === 'max-tokens';
 
   async function* summaryStream(options, original) {
     options = { ...options, messages: withSummaryLanguage(options.messages) };   // #4750: the summary follows the conversation's language
+    // These routes explicitly declare the chat-template thinking switch. A
+    // checkpoint needs factual text, not a fresh reasoning budget that can eat
+    // its entire output cap. The user's normal reply settings stay untouched.
+    if (isLocalRoute(options.provider) || summaryProviders.has(options.provider)) {
+      options = { ...options, reasoningEffort: 'off', maxTokens: Math.min(options.maxTokens ?? 2048, 2048) };
+    }
     let window = 0;
     try { window = (await llm.resolveModelInfo(options.provider, options.model, options.signal))?.context?.contextWindow ?? 0; } catch { window = 0; }
     const messages = options.messages ?? [];
@@ -167,10 +175,10 @@ export function apply(ctx) {
     // The whole request fits by this price: ask as the Harness would (the model server's cache of the conversation is reused).
     if (price(messages) + estimateTools({ tools: options.tools }) * density <= limit) {
       const first = await drain(original.call(this, options));
-      if (!refusedForSize(first.finish)) { for (const chunk of first.chunks) yield chunk; return; }
+      if (!incompleteSummary(first.finish)) { for (const chunk of first.chunks) yield chunk; return; }
       density = Math.min(MAX_DENSITY, density * 1.6);
       careful.set(key, density);
-      log('warn', 'the summary request did not fit the window; asking in pieces');
+      log('warn', 'the summary request overflowed or was truncated; asking in smaller pieces');
     }
     // In pieces. The instruction is the last message; the system prompt, when there is one, the first.
     const instruction = messages[messages.length - 1];
@@ -179,9 +187,10 @@ export function apply(ctx) {
     let tools = options.tools;
     if (tools && estimateTools({ tools }) * density > window / 3) tools = undefined;   // a long tool list only describes tools: the summary does not need it
     const fixed = (system ? estimateMessage(system) : 0) * density + estimateTools({ tools }) * density + estimateMessage(instruction) * density;
-    let budget = summaryBudget({ window, summaryTokens: summaryTokens * 2, systemTokens: fixed, instructionTokens: 0 });
+    let budget = Math.min(Math.floor(window * 0.5), summaryBudget({ window, summaryTokens: summaryTokens * 2, systemTokens: fixed, instructionTokens: 0 }));
     for (let attempt = 0; ; attempt++) {
       const runs = splitMessages(body, Math.max(1024, budget), density);
+      if (runs.length > 64) throw new Error('The conversation needs more than 64 summary pieces; no history was replaced.');
       log('info', `summarising ${body.length} messages in ${runs.length} piece(s) for a ${window}-token window (density ${density.toFixed(2)}, about ${Math.round(budget)} tokens a piece)`);
       let failed = null, summary = '';
       for (let i = 0; i < runs.length && !failed; i++) {
@@ -190,7 +199,7 @@ export function apply(ctx) {
         const { tools: _drop, ...rest } = options;
         const piece = { ...rest, ...(tools ? { tools } : {}), messages: [...(system ? [system] : []), ...carried, ...runs[i], instruction] };
         const { text, finish, chunks } = await drain(original.call(this, piece));
-        if (refusedForSize(finish)) { failed = finish; break; }
+        if (incompleteSummary(finish)) { failed = finish; break; }
         // The last piece's answer is the summary the Harness reads; a piece that ended in another error ends the request the same way.
         if (i === runs.length - 1 || finish?.kind === 'error' || finish?.kind === 'aborted') { for (const chunk of chunks) yield chunk; return; }
         summary = text;

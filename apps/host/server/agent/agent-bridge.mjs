@@ -1357,16 +1357,20 @@ ${note.text}
       : connection ? { baseUrl: connection.baseUrl, key: connection.apiKey, modelId: route.modelId } : null;
     if (!inst || !(route.contextWindow > 0)) return null;
     const carried = fresh && history.length ? withEarlierConversation(history, message) : message;
-    if (carried.length < COUNT_ABOVE_CHARS) return null;
-    const count = text => countTokens({ baseUrl: inst.baseUrl, key: inst.key, model: inst.modelId, text, signal });
-    let tokens = await count(carried);
-    if (tokens == null) return null;
     const now = fresh ? null : await contextOf(runtime, sessionId, signal);
     const window = now?.window || route.contextWindow;
     const pressure = now?.tokens ?? 0;
     // Where the Harness starts summarising by itself on this window (profile.mjs: the reply keeps its room, then the headroom).
     const reply = localOutputBudget(window);
     const threshold = Math.floor(Math.min(window * 0.8, window - reply - compactionHeadroom(window, reply)));
+    // A giant old message can make Harness retained-tail selection return no
+    // range. Force a balanced idle compaction before even a short next prompt.
+    if (carried.length < COUNT_ABOVE_CHARS) return pressure >= threshold
+      ? { action: 'summarize', window, pressure, tokens: 0, why: 'pressure' } : null;
+    const count = text => countTokens({ baseUrl: inst.baseUrl, key: inst.key, model: inst.modelId, text, signal });
+    let tokens = await count(carried);
+    if (tokens == null) return pressure >= threshold
+      ? { action: 'summarize', window, pressure, tokens: 0, why: 'pressure' } : null;
     let verdict = decideFit({ window, pressure, messageTokens: tokens, threshold });
     // The earlier conversation carried into a fresh session is what pushed it over: send the message alone instead.
     if (verdict.action === 'too-large' && carried !== message) {
@@ -1402,7 +1406,7 @@ ${note.text}
     const known = w > 0 && before && after;
     const template = known ? FIT_TEXT.summarized : FIT_TEXT.summarizedShort;
     const values = known ? [pct(before), pct(after)] : [];
-    return { type: 'delta', own: true, text: '\n\n' + fill(template, values), key: template, values, noteReason: 'compacted' };
+    return { type: 'delta', own: true, text: '\n\n' + fill(template, values) + '\n\n', key: template, values, noteReason: 'compacted' };
   }
 
   /** "/compact": summarise the older messages of this chat now, and say in plain words what happened. */

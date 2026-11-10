@@ -321,7 +321,9 @@ export function buildProfile({ local = [], connections = [], gate = true, tools 
     // Its web question names the search service the person chose (a keyed one only when its key is saved), and the person's switch skips the question.
     ...(gate ? [{ insert: [{ id: 'strata-gate', name: GATE_PLUGIN, config: { web: { provider: SEARCH_NAMES[keyed ?? 'builtin'], skipAsk: tools.webWithoutAsking === true } } }] }] : []),
     // Compaction decides from what the model server measured, and its summary requests always fit the window (plugins/strata-context.mjs).
-    { insert: [{ id: 'strata-context', name: CONTEXT_PLUGIN, config: {} }] },
+    { insert: [{ id: 'strata-context', name: CONTEXT_PLUGIN, config: {
+      summaryProviders: Object.entries(providers).filter(([, provider]) => provider.compat === THINKING_COMPAT).map(([id]) => id),
+    } }] },
     // Helper agents on a model the person names: every model the app can reach is allowed, and the plugin makes the choice forgiving (plugins/strata-models.mjs).
     ...(subagentRoutes.length ? [{ id: 'subagent-model-selection-settings', config: { enabled: true, allowedModels: subagentRoutes.map(r => ({ provider: r.provider, model: r.model })) } }] : []),
     ...(subagentRoutes.length ? [{ insert: [{ id: 'strata-models', name: MODELS_PLUGIN, config: { routes: subagentRoutes } }] }] : []),

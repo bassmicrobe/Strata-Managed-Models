@@ -79,6 +79,13 @@ test('a summary request is split into pieces that fit, each message whole when i
   assert.equal(clipMessage(text(100), 8000, 1).content[0].text.length, 100, 'a small message is untouched');
   const oneBig = splitMessages([text(10), text(600000), text(10)], 6000, 1);
   assert.ok(oneBig.every(r => r.reduce((n, m) => n + estimateMessage(m), 0) <= 6000), 'every piece fits after the cut');
+  assert.equal(oneBig.flat().flatMap(m => m.content).map(b => b.text).join(''), 'x'.repeat(600020), 'plain-text messages are split without losing their middle');
+  const unicode = 'a' + '🌲😀あ'.repeat(5000);
+  const unicodeRuns = splitMessages([{ role: 'user', content: [{ type: 'text', text: unicode }] }], 600, 1);
+  const unicodeParts = unicodeRuns.flat().flatMap(m => m.content).map(b => b.text);
+  assert.equal(unicodeParts.join(''), unicode);
+  assert.ok(unicodeParts.every(text => text.isWellFormed()), 'no summary piece bisects a surrogate pair');
+  assert.ok(unicodeRuns.every(run => run.reduce((n, m) => n + estimateMessage(m), 0) <= 600));
   // A tool call and its result stay together when a clean cut exists.
   const call = { role: 'assistant', content: [{ type: 'tool-call', id: 'c', name: 'read', arguments: '{}' }] };
   const result = { role: 'tool', toolCallId: 'c', content: [{ type: 'text', text: 'y'.repeat(2000) }] };

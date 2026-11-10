@@ -44,12 +44,12 @@ function mock({ completion, summary } = {}) {
   return { calls, completions, summaries, fetchImpl };
 }
 
-function setup(t, api) {
+function setup(t, api, modelOptions = {}) {
   const directory = mkdtempSync(join(tmpdir(), 'strata-compaction-transport-'));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const service = createModelProviders({ directory, fetchImpl: api.fetchImpl });
   const saved = service.save({ kind: 'custom', name: 'Test local model', protocol: 'openai-chat', baseUrl,
-    apiKey: 'test-only-key', models: [{ id: 'test-model', contextMax: 8192, reasoning: true }] }).connections[0];
+    apiKey: 'test-only-key', models: [{ id: 'test-model', contextMax: 8192, reasoning: true, ...modelOptions }] }).connections[0];
   const selection = { connectionId: saved.id, modelId: 'test-model' };
   const preparation = () => createChatPreparation({ dataDir: directory, privateDir: () => {}, fetchImpl: api.fetchImpl });
   const frames = [];
@@ -100,6 +100,70 @@ test('an upstream context rejection forces one compaction retry before any answe
   assert.equal(fixture.frames.filter(f => f.type === 'delta').map(f => f.text).join(''), 'A single answer.');
   assert.equal(fixture.frames.filter(f => f.type === 'done').length, 1);
 });
+
+test('a saved model output cap is reserved even when its history is well below the usual 72 percent trigger', async t => {
+  const contextMax = 32768, maxOutput = 24576, slack = 1024;
+  const api = mock(), fixture = setup(t, api, { contextMax, maxOutput });
+  const messages = [{ role: 'user', content: 'Remember KEY-ALPHA. ' + 'a'.repeat(20000) },
+    { role: 'assistant', content: 'Selected KEY-BETA. ' + 'b'.repeat(20000) }];
+  const originalTokens = count({ messages: [{ role: 'system', content: fixture.turn.systemPrompt }, ...messages, { role: 'user', content: fixture.turn.message }] });
+  assert(originalTokens < contextMax * 0.72, 'the percentage trigger alone would not compress this input');
+  assert(originalTokens + maxOutput + slack > contextMax, 'the saved output allowance makes this input unsafe');
+  await fixture.service.stream({ ...fixture.turn, history: messages });
+  assert(api.summaries.length > 0);
+  assert.equal(api.completions.length, 1);
+  const finalTokens = count(api.completions[0].payload);
+  assert(finalTokens + maxOutput + slack <= contextMax);
+  assert.equal(fixture.frames.find(f => f.type === 'compaction').beforeTokens, originalTokens);
+  assert.equal(fixture.frames.find(f => f.type === 'compaction').afterTokens, finalTokens);
+  assert.equal(fixture.frames.find(f => f.type === 'start').contextMax, contextMax);
+  assert.equal(fixture.service.resolve(fixture.selection).model.maxOutput, maxOutput);
+  assert.equal(api.completions[0].payload.messages.at(-1).content, fixture.turn.message);
+});
+
+test('saved output caps also reach preparation on an upstream context retry', async t => {
+  const maxOutput = 24576;
+  const api = mock({ completion: (call, attempt) => attempt === 1 ? json({ error: { message: 'maximum context length exceeded' } }, 400)
+    : sse([{ choices: [{ delta: { content: 'Recovered.' }, finish_reason: 'stop' }], usage: { prompt_tokens: count(call.payload), completion_tokens: 2 } }, '[DONE]']) });
+  const fixture = setup(t, api, { contextMax: 32768, maxOutput }), preparationCalls = [];
+  await fixture.service.stream({ ...fixture.turn, history: smallHistory(), preparePayload: async (payload, target) => {
+    preparationCalls.push(target);
+    return fixture.preparePayload(payload, target);
+  } });
+  assert.equal(preparationCalls.length, 2);
+  assert.deepEqual(preparationCalls.map(c => c.maxOutput), [maxOutput, maxOutput]);
+  assert.deepEqual(preparationCalls.map(c => c.force === true), [false, true]);
+  assert.equal(api.completions.length, 2);
+  assert.equal(fixture.frames.filter(f => f.type === 'done').length, 1);
+});
+
+for (const protocol of ['anthropic', 'openai-responses']) {
+  test(`${protocol} preserves the existing recent-40 bound and flattens history pictures without invoking the OpenAI compactor`, async t => {
+    const requests = [];
+    const api = { fetchImpl: async (url, init) => {
+      requests.push({ url, payload: JSON.parse(init.body) });
+      return protocol === 'anthropic' ? sse([{ type: 'message_start', message: { usage: { input_tokens: 300 } } },
+        { type: 'content_block_delta', delta: { text: 'Protocol answer.' } }, { type: 'message_delta', usage: { output_tokens: 4 } }, { type: 'message_stop' }])
+        : sse([{ type: 'response.output_text.delta', delta: 'Protocol answer.' }, { type: 'response.completed', response: { usage: { input_tokens: 300, output_tokens: 4 } } }]);
+    } };
+    const fixture = setup(t, api, { contextMax: 32768 });
+    const saved = fixture.service.list().connections[0];
+    fixture.service.save({ ...saved, protocol });
+    const messages = Array.from({ length: 60 }, (_, i) => ({ role: i % 2 ? 'assistant' : 'user', content: [
+      { type: 'text', text: `history-${i}` }, { type: 'image_url', image_url: { url: 'data:image/png;base64,OLD' } },
+    ] }));
+    await fixture.service.stream({ ...fixture.turn, history: messages, images: [{ url: 'data:image/png;base64,NEW' }],
+      preparePayload: () => { throw new Error('This protocol has no OpenAI compaction adapter.'); } });
+    assert.equal(requests.length, 1);
+    assert.equal(new URL(requests[0].url).pathname, protocol === 'anthropic' ? '/v1/messages' : '/v1/responses');
+    const sent = requests[0].payload.messages ?? requests[0].payload.input;
+    assert.equal(sent.length, 41);
+    assert.deepEqual(sent.slice(0, 40), messages.slice(-40).map(m => ({ role: m.role, content: m.content[0].text })));
+    assert.equal(sent.at(-1).content, fixture.turn.message);
+    assert(!JSON.stringify(requests[0].payload).includes('base64'));
+    assert.equal(fixture.frames.filter(f => f.type === 'done').length, 1);
+  });
+}
 
 test('a second context rejection stops after one retry and never emits a false start or answer', async t => {
   const api = mock({ completion: () => json({ error: { message: 'context_length exceeded' } }, 400) });

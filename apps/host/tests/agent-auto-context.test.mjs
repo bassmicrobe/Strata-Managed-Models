@@ -53,12 +53,12 @@ test('a failed compaction is not a retry loop', async () => {
 });
 
 const skip = !process.env.STRATA_HARNESS_DIR || !resolveHarness({ env: process.env }).ok ? 'STRATA_HARNESS_DIR is not set to a built Harness' : false;
-async function rig(t, api, chunkDelayMs = 5) {
-  const worker = await startScriptedWorker({ chunkDelayMs });
+async function rig(t, api, chunkDelayMs = 5, workerOptions = {}, context = 32768) {
+  const worker = await startScriptedWorker({ chunkDelayMs, ...workerOptions });
   const dir = mkdtempSync(join(tmpdir(), 'strata-auto-context-'));
   const ws = join(dir, 'ws'); mkdirSync(ws);
-  const local = [{ id: 'i', label: 'Scripted', baseUrl: worker.url, modelId: 'scripted-model', context: 32768 }];
-  const connections = api ? [{ id: 'managed', name: 'Managed model', baseUrl: worker.url, protocol: 'openai-chat', models: [{ id: 'scripted-model', contextMax: 32768 }] }] : [];
+  const local = [{ id: 'i', label: 'Scripted', baseUrl: worker.url, modelId: 'scripted-model', context }];
+  const connections = api ? [{ id: 'managed', name: 'Managed model', baseUrl: worker.url, protocol: 'openai-chat', models: [{ id: 'scripted-model', contextMax: context }] }] : [];
   const bridge = createAgentBridge({ dataDir: dir, localInstances: () => api ? [] : local, connections: () => connections, env: process.env, startTimeoutMs: 90_000 });
   t.after(async () => { await bridge.close(); await worker.close(); try { rmSync(dir, { recursive: true, force: true, maxRetries: 3 }); } catch { /* Windows sandbox cleanup is best effort */ } });
   return { bridge, worker, options: { chatId: 'recover', workspacePath: ws, mode: 'bypass', choice: api ? { connectionId: 'managed', modelId: 'scripted-model' } : null } };
@@ -109,4 +109,25 @@ test('Stop during preflight compression cancels before the new message is submit
   assert.equal(stopped, true);
   assert.equal(frames.at(-1).cancelled, true);
   assert.ok(r.worker.requests.every(q => !q.raw.includes('NEVER_SUBMITTED')));
+});
+
+test('a giant old 128K API prompt is compacted before a short follow-up, including truncated summary recovery', { skip, timeout: 120_000 }, async t => {
+  const r = await rig(t, true, 5, { summaryNeedsThinkingOff: true, summaryMaxChars: 50000 }, 131072);
+  const first = [];
+  const middle = 'MIDDLE_FACT_CEDAR_942_RELEASE_23';
+  await r.bridge.runTurn({ ...r.options, thinking: 'medium', thinkingBudget: 4096,
+    message: `SCRIPT:contextready 112000\n${'alpha '.repeat(10000)}${middle}${'omega '.repeat(10000)}`,
+    onFrame: f => first.push(f) });
+  assert.match(first.filter(f => f.type === 'delta').map(f => f.text).join(''), /READY/);
+  const afterFirst = r.worker.requests.length, next = [];
+  await r.bridge.runTurn({ ...r.options, message: 'SCRIPT:hello', thinking: 'medium', thinkingBudget: 4096, onFrame: f => next.push(f) });
+  const later = r.worker.requests.slice(afterFirst), summaries = later.filter(q => q.summary);
+  assert.ok(summaries.some(q => q.summaryTruncated), 'the near-full summary was cut by the provider');
+  assert.ok(summaries.some(q => !q.summaryTruncated), 'smaller summary pieces succeeded');
+  assert.ok(summaries.every(q => q.params.chat_template_kwargs?.enable_thinking === false), 'only auxiliary summaries turn thinking off');
+  assert.ok(summaries.some(q => !q.summaryTruncated && q.raw.includes(middle)), 'facts in the middle of a giant message reach a successful summary');
+  assert.equal(later[0].summary, true, 'compression precedes the new small question');
+  assert.equal(later.at(-1).params.chat_template_kwargs?.enable_thinking, true, 'ordinary answer keeps thinking enabled');
+  assert.equal(next.filter(f => f.type === 'error').length, 0);
+  assert.match(next.filter(f => f.type === 'delta').map(f => f.text).join(''), /Hello from/);
 });

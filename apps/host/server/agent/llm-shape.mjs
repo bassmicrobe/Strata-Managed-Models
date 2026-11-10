@@ -14,7 +14,7 @@ import http from 'node:http';
 import https from 'node:https';
 
 /** The thinking budgets the composer offers (0 = no limit is not a budget). */
-export const BUDGETS = Object.freeze([2048, 8192, 32768]);
+export const BUDGETS = Object.freeze([2048, 4096, 8192, 32768]);
 /** The offered budget nearest to what a chat asks for (0 stays 0). */
 export function nearestBudget(value) {
   const n = Number(value);

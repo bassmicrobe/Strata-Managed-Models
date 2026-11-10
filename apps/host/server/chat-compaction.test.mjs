@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ChatCompactionError, createChatCompactor } from './chat-compaction.mjs';
@@ -99,6 +99,32 @@ test('persistent prefix summary is reused after restart, without calling a model
   assert.equal(result.compaction.cached, true);
   assert.equal(result.payload.messages.at(-1).content, 'Continue.');
   assert.equal(second.calls.length, 0);
+});
+
+test('an unavailable cache directory leaves safe in-memory compaction available instead of failing host startup', async t => {
+  const directory = folder(t), blocked = join(directory, 'chat-compaction'), reports = [], api = mock();
+  writeFileSync(blocked, 'This existing file must remain intact.');
+  const compact = factory(api, { dataDir: directory, report: r => reports.push(r) }), payload = history();
+  const first = await compact({ model, payload, chatId: 'memory-only' });
+  assert.equal(first.compaction.persisted, false);
+  assert(first.compaction.afterTokens < first.compaction.beforeTokens);
+  const n = api.summaries().length;
+  const next = await compact({ model, payload, chatId: 'memory-only' });
+  assert.equal(next.compaction.cached, true);
+  assert.equal(api.summaries().length, n);
+  assert.equal(readFileSync(blocked, 'utf8'), 'This existing file must remain intact.');
+  assert(reports.some(r => r.status === 'compaction-cache-unavailable'));
+});
+
+test('a cache ACL failure disables disk reads and writes without preventing safe compaction', async t => {
+  const directory = folder(t), api = mock(), reports = [];
+  const compact = factory(api, { dataDir: directory,
+    privateDir: () => { throw new Error('Cannot apply private directory permissions'); }, report: r => reports.push(r) });
+  const result = await compact({ model, payload: history(), chatId: 'no-private-cache' });
+  assert.equal(result.compaction.persisted, false);
+  assert(result.compaction.afterTokens < result.compaction.beforeTokens);
+  assert.deepEqual(readdirSync(join(directory, 'chat-compaction')), []);
+  assert(reports.some(r => r.status === 'compaction-cache-unavailable'));
 });
 
 test('summary cache is isolated by chat and model, and changed history invalidates its digest', async t => {

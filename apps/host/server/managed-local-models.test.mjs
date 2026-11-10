@@ -153,6 +153,28 @@ test('chat autoloads the selected historical model and forwards images with back
   assert.equal((await h.request('dense')).status, 200, 'backend key is reread for rotation');
 });
 
+test('agent preflight counts the selected managed model through the authenticated gateway', async t => {
+  let counted;
+  const h = await fixture(t, { active: ['original'], onProbe: (url, init, ready) => {
+    if (url.pathname !== '/v1/messages/count_tokens') return;
+    counted = JSON.parse(init.body);
+    assert.equal(ready[0].id, 'dense');
+    return jsonResponse({ input_tokens: 12345 });
+  } });
+  const endpoint = h.base + '/messages/count_tokens';
+  const body = JSON.stringify({model:'dense-model',messages:[{role:'user',content:'Count this exact prompt.'}]});
+  assert.equal((await fetch(endpoint,{method:'POST',body})).status,401);
+  const response=await fetch(endpoint,{method:'POST',headers:{'content-type':'application/json',authorization:'Bearer '+h.token},body});
+  assert.equal(response.status,200);
+  assert.deepEqual(await response.json(),{input_tokens:12345});
+  assert.equal(counted.messages[0].content,'Count this exact prompt.');
+  assert.deepEqual(h.commands,['stop','dense']);
+  const forwarded=h.requests.find(r=>r.url.endsWith('/messages/count_tokens'));
+  assert.equal(new Headers(forwarded.init.headers).get('authorization'),'Bearer private-backend-key');
+  assert(!JSON.stringify(forwarded.init).includes(h.token));
+  assert(!h.requests.some(r=>r.url.endsWith('/chat/completions')));
+});
+
 test('whole streamed response owns the mutex; a queued other-model chat loads only after it ends', async t => {
   let streamController;
   const stream = new ReadableStream({ start(controller) { streamController = controller; controller.enqueue(new TextEncoder().encode('data: first\n\n')); } });
