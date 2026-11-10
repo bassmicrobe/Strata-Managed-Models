@@ -118,10 +118,29 @@ export async function startScriptedWorker({ port = 0, chunkDelayMs = 40, model =
       if (!closed) finish('stop', tokens ?? parts.length);
     };
 
+    // Recovery fixtures must recognise the summary request before the original directive it quotes.
+    if (messages.some(m => /evolving goals/.test(text(m)))) { requests.at(-1).summary = true; return say(['Summary of the earlier conversation: the person asked for echoes of a word and got them.']); }
+    const contextContinueAt = messages.findLastIndex(m => m.role === 'user' && /^Continue the unfinished request from the compacted conversation\./.test(text(m)));
+    if (contextContinueAt >= 0 && contextContinueAt > messages.findLastIndex(m => m.role === 'user' && /SCRIPT:/.test(text(m)))) {
+      requests.at(-1).contextContinued = true;
+      return say(['Continued after automatic context compression.']);
+    }
+    if (directive?.[1] === 'contextrecover') {
+      promptTokens = parseInt((directive[2] ?? '').trim(), 10) || 32000;
+      send({ role: 'assistant', content: '', reasoning_content: 'The context filled before I could answer.' });
+      return finish('stop', 20);
+    }
+
     // A model that read "[sandbox: escalation available ...]" retries the exact call once with the narrowest wider mode.
     // Only this prompt's own tool results count: a chat that has run tools before carries older ones.
     const promptAt = messages.findLastIndex(m => m.role === 'user' && /SCRIPT:/.test(text(m)));
     const toolMessages = messages.slice(promptAt + 1).filter(m => m.role === 'tool');
+    if (directive?.[1] === 'contextrecovertool') {
+      if (!toolMessages.length) return toolCall(shellName(), { command: shellCommand('once.txt', 'completed'), description: 'Record completed work once' });
+      promptTokens = 32000;
+      send({ role: 'assistant', content: '', reasoning_content: 'The tool finished, but the context filled before my final answer.' });
+      return finish('stop', 20);
+    }
     if (last.role === 'tool' && ['retrywrite', 'retryshell'].includes(directive?.[1]) && toolMessages.length === 1 && /escalation available/.test(text(last))) {
       const [file, ...rest] = (directive[2] ?? '').trim().split(/\s+/);
       const value = rest.join(' ') || 'run';
@@ -195,8 +214,6 @@ export async function startScriptedWorker({ port = 0, chunkDelayMs = 40, model =
       return say(['Tool finished. ', `Result: ${result}`]);
     }
     const [name, args] = [directive?.[1], (directive?.[2] ?? '').trim()];
-    // The Harness's compaction request (its summarizer prompt asks for the person's evolving goals): answer with a short summary.
-    if (messages.some(m => /evolving goals/.test(text(m)))) { requests.at(-1).summary = true; return say(['Summary of the earlier conversation: the person asked for echoes of a word and got them.']); }
     // The Harness's session-title request carries the same user text but offers no tools.
     if (!(body.tools ?? []).length && messages.some(m => /concise title/i.test(text(m)))) return say(['Scripted title']);
     if (name === 'slow') {

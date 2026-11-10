@@ -87,6 +87,8 @@ import { findFreePort, listenProblem } from './ports.mjs';
 import { validateChatImages } from './chat-images.mjs';
 import { createTimeSkip, measureFolder, timeskipRevisionMessage, imageTypeOf } from './timeskip.mjs';
 import { createManagedLocalModels } from './managed-local-models.mjs';
+import { createChatPreparation } from './chat-compaction-bridge.mjs';
+import { resolveChatHistory } from './chat-history.mjs';
 import { createUpdateMaintenance } from './update-maintenance.mjs';
 import { createTailscaleAccess } from './tailscale-access.mjs';
 
@@ -206,6 +208,7 @@ const managedModels = createManagedLocalModels({
   log: line => console.log(line),
 });
 const updateMaintenance = createUpdateMaintenance();
+const prepareChat = createChatPreparation({ dataDir: store.DATA_DIR });
 if (managedModels.enabled) {
   const baseUrl = `http://127.0.0.1:${PORT}/api/managed-models/v1`;
   const registration = managedModels.providerRegistration(baseUrl);
@@ -609,18 +612,20 @@ function clientName(req) {
   return 'Local client';
 }
 
-async function runRemoteTurn({ selection, message, history, images = [], thinking, onFrame, signal, workspaceId }) {
+async function runRemoteTurn({ selection, message, history, images = [], thinking, onFrame, signal, workspaceId, sessionId }) {
   const controller = new AbortController();
   const requestSignal = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
   let entry;
   const started = Date.now();
   try {
     const { connection, model } = modelProviders.resolve(selection);
+    const preparePayload = prepareChat({ chatId: sessionId, signal: requestSignal, onFrame,
+      model: { contextMax: model.contextMax, maxOutput: model.maxOutput, ...managedModels.compactionTarget(connection.id, model.id) } });
     if (connection.protocol === 'openai-chat' && model.reasoning == null) await visionProbe.check(connection, model.id);
     const appliedSkills = selectSkills(skillState, message, workspaceId);
     entry = serving.open({ client: 'Strata chat', endpoint: connection.protocol === 'anthropic' ? '/messages' : connection.protocol === 'openai-responses' ? '/responses' : '/chat/completions', model: `${connection.name} · ${model.name}`, cancel: () => controller.abort(new DOMException('Cancelled by the user', 'AbortError')) });
     serving.mark(entry.id, { state: 'generating' });
-    const result = await modelProviders.stream({ selection, message, history, images, thinking, signal: requestSignal, systemPrompt: ['You are Strata, a helpful assistant. Answer clearly. Do not claim to have read files or performed actions unless their results are included in the conversation.', skillInstructions(appliedSkills)].filter(Boolean).join('\n\n'), onFrame: frame => {
+    const result = await modelProviders.stream({ selection, message, history, images, thinking, preparePayload, signal: requestSignal, systemPrompt: ['You are Strata, a helpful assistant. Answer clearly. Do not claim to have read files or performed actions unless their results are included in the conversation.', skillInstructions(appliedSkills)].filter(Boolean).join('\n\n'), onFrame: frame => {
       if (frame.type === 'start') noteSkillUse(appliedSkills);
       if (frame.type === 'done') serving.mark(entry.id, { tokensIn: frame.tokensIn, tokensOut: frame.tokensOut, usageSource: frame.usageSource });
       onFrame({ ...frame, requestId: entry.id, model: model.name, contextMax: model.contextMax, remoteModel: true, ...(frame.type === 'start' ? { skills: appliedSkills.map(s => s.name) } : {}) });
@@ -632,7 +637,8 @@ async function runRemoteTurn({ selection, message, history, images = [], thinkin
     const refusedPicture = images.length && /HTTP [45]\d\d/.test(String(err.message)) ? ' If this model does not read pictures, turn off "Read pictures with this model" in Settings → Models (edit this connection), or choose a model that does.' : '';
     const message = requestSignal.aborted ? 'Request cancelled. Partial output is preserved.' : err.name === 'TimeoutError' ? 'The model API timed out. Try again.' : err.message + refusedPicture;
     if (entry) serving.finish(entry.id, { durationMs: Date.now() - started, error: message });
-    onFrame({ type: 'error', message, requestId: entry?.id });
+    onFrame({ type: 'error', message, requestId: entry?.id,
+      ...(String(err.code ?? '').startsWith('context-') ? { key: err.message, code: err.code } : {}) });
     return { error: message };
   }
 }
@@ -683,11 +689,11 @@ async function runAgentTurn({ res, controller, chatId, body, message, workspaceI
 }
 
 async function runTurn({ message, history = [], onFrame, signal, client, workspaceId = null, sessionId = null, remoteModel = null, runtimeModelId = undefined, nativeModelId, images=[], useTools=false, thinking='medium', thinkingBudget=0 }) {
-  if (remoteModel) return runRemoteTurn({ selection: remoteModel, message, history, images, thinking, onFrame, signal, workspaceId });
+  if (remoteModel) return runRemoteTurn({ selection: remoteModel, message, history, images, thinking, onFrame, signal, workspaceId, sessionId });
   if(native.hasLive()||nativeModelId){
     let instance;try{instance=native.resolveInstance(nativeModelId??native.state().defaultId);}catch(e){const message=plainNoModel(e.message);onFrame({type:'error',message});return {error:message};}const started=Date.now(),cancel=new AbortController();
     const entry=serving.open({client:client??'Strata chat',endpoint:'/chat/completions',model:instance.apiModelId,instanceId:instance.id,gpuIds:instance.gpus.map(String),cancel:()=>cancel.abort()});
-    try{serving.mark(entry.id,{state:'generating'});const applied=selectSkills(skillState,message,workspaceId);const result=await proxyCompletion({baseUrl:`http://127.0.0.1:${instance.port}/v1`,modelId:instance.apiModelId,authorization:instance.key,message,history,images,extra:{strata_mcp:useTools===true,...(thinkingBudget>0&&String(thinking).toLowerCase()!=='off'?{reasoning_budget_tokens:thinkingBudget}:{}),reasoning_effort:({off:'none',max:'high'}[String(thinking).toLowerCase()]??String(thinking).toLowerCase())},systemPrompt:[SYSTEM_PROMPT,skillInstructions(applied)].filter(Boolean).join('\n\n'),signal:signal?AbortSignal.any([signal,cancel.signal]):cancel.signal,onFrame:frame=>onFrame({...frame,requestId:entry.id,model:instance.label,contextMax:instance.metrics?.engine?.max_context??instance.context,skills:applied.map(s=>s.name)})});serving.mark(entry.id,{...result,usageSource:result.usageSource});serving.finish(entry.id,{tokensOut:result.tokensOut,durationMs:Date.now()-started});return result;}catch(e){serving.finish(entry.id,{durationMs:Date.now()-started,error:e.message});onFrame({type:'error',message:e.message,requestId:entry.id});return {error:e.message};}
+    try{serving.mark(entry.id,{state:'generating'});const applied=selectSkills(skillState,message,workspaceId);const result=await proxyCompletion({baseUrl:`http://127.0.0.1:${instance.port}/v1`,modelId:instance.apiModelId,authorization:instance.key,message,history,images,preparePayload:prepareChat({chatId:sessionId,signal:signal?AbortSignal.any([signal,cancel.signal]):cancel.signal,onFrame,model:{contextMax:instance.metrics?.engine?.max_context??instance.context}}),extra:{strata_mcp:useTools===true,...(thinkingBudget>0&&String(thinking).toLowerCase()!=='off'?{reasoning_budget_tokens:thinkingBudget}:{}),reasoning_effort:({off:'none',max:'high'}[String(thinking).toLowerCase()]??String(thinking).toLowerCase())},systemPrompt:[SYSTEM_PROMPT,skillInstructions(applied)].filter(Boolean).join('\n\n'),signal:signal?AbortSignal.any([signal,cancel.signal]):cancel.signal,onFrame:frame=>onFrame({...frame,requestId:entry.id,model:instance.label,contextMax:instance.metrics?.engine?.max_context??instance.context,skills:applied.map(s=>s.name)})});serving.mark(entry.id,{...result,usageSource:result.usageSource});serving.finish(entry.id,{tokensOut:result.tokensOut,durationMs:Date.now()-started});return result;}catch(e){serving.finish(entry.id,{durationMs:Date.now()-started,error:e.message});onFrame({type:'error',message:e.message,requestId:entry.id,...(String(e.code??'').startsWith('context-')?{key:e.message,code:e.code}:{})});return {error:e.message};}
   }
   runtimeState();
   let instance;
@@ -733,6 +739,8 @@ async function runTurn({ message, history = [], onFrame, signal, client, workspa
           history,
           systemPrompt,
           modelLabel: v.label,
+          preparePayload: prepareChat({ chatId: sessionId, signal: requestSignal, onFrame,
+            model: { contextMax } }),
           candidates: readableCandidates(),
           onFrame: (frame) => {
             if(frame.type==='stats'||frame.type==='done')modelMonitor.progressOutput(frame.tokensOut);
@@ -2147,6 +2155,8 @@ async function api(req, res, path, method, url) {
     /* Agent turn, when the component is there and this request can use it. A client that disappears
        detaches from the turn (it keeps running in the Harness); Stop is its own request. */
     const chatId = typeof body.sessionId === 'string' && body.sessionId ? body.sessionId : null;
+    try { body.history = await resolveChatHistory({ chatStore, chatId, history: body.history, reference: body.historyRef }); }
+    catch (err) { res.write(JSON.stringify({ type: 'error', message: err.message, key: err.message }) + '\n'); res.end(); return; }
     const agentSkip = process.env.STRATA_AGENT === 'off' ? 'The agent is turned off (STRATA_AGENT=off).'
       : body.agent === false || body.tools === false ? 'This chat runs without the agent.'
       : !chatId ? 'This request did not name a chat.'

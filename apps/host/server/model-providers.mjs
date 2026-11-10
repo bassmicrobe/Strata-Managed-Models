@@ -5,6 +5,7 @@ import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync } from '
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { makePrivate } from './private-file.mjs';
+import { isContextOverflow } from './agent/context-budget.mjs';
 
 export const PROVIDER_CATALOG = [
   { id: 'openai', name: 'OpenAI', baseUrl: 'https://api.openai.com/v1', protocol: 'openai-responses' },
@@ -119,8 +120,12 @@ export function createModelProviders({ directory, changed = () => {}, fetchImpl 
       fail('Could not reach the model API. Check the address and whether the server is running.');
     }
     if (!res.ok) {
+      if ([400, 413, 422].includes(res.status)) {
+        const detail = await res.text().catch(() => '');
+        if (isContextOverflow({ message: detail })) throw Object.assign(new Error('The model context is full.'), { code: 'context-overflow' });
+      }
       // Provider errors can echo credentials/request bodies. Report status, not their raw body.
-      await res.body?.cancel();
+      await res.body?.cancel().catch(() => {});
       fail(res.status === 401 || res.status === 403 ? 'The model API rejected the credentials. Check the API key.' : res.status === 404 ? 'The model API could not find this endpoint or model. Check the base URL and model ID.' : res.status === 429 ? 'The model API is rate limited or out of credit. Try again later.' : `The model API returned HTTP ${res.status}. Check the connection and try again.`);
     }
     return res;
@@ -143,15 +148,20 @@ export function createModelProviders({ directory, changed = () => {}, fetchImpl 
     const models = [...new Map(rows.filter(m => text(m.id, 256)).map(m => [m.id, { id: text(m.id, 256), name: text(m.display_name ?? m.name) || text(m.id, 256), contextMax: numeric(m.context_length ?? m.max_context_length ?? m.context_window), maxOutput: numeric(m.max_output_tokens ?? m.max_completion_tokens ?? m.top_provider?.max_completion_tokens), vision: modelReadsPictures(m), reasoning: modelSupportsReasoning(m) }])).values()];
     return { models: models.sort((a, b) => a.name.localeCompare(b.name)) };
   }
-  async function stream({ selection, message, history = [], systemPrompt = '', images = [], thinking, signal, onFrame }) {
+  async function stream({ selection, message, history = [], systemPrompt = '', images = [], thinking, signal, onFrame, preparePayload }) {
     const { connection, model } = resolve(selection);
     const started = Date.now();
-    const messages = history.filter(m => ['user', 'assistant'].includes(m.role) && typeof m.content === 'string').slice(-40).map(m => ({ role: m.role, content: m.content }));
+    // Local OpenAI chat has persistent compaction. Keep the pre-existing bound
+    // for protocols whose own summary adapters have not been implemented.
+    const selectedHistory = connection.protocol === 'openai-chat' ? history : history.slice(-40);
+    const messages = selectedHistory.filter(m => ['user', 'assistant'].includes(m.role) && (typeof m.content === 'string' || Array.isArray(m.content)))
+      .map(m => ({ role: m.role, content: connection.protocol === 'openai-chat' || typeof m.content === 'string'
+        ? m.content : m.content.filter(b => b.type === 'text').map(b => b.text ?? '').join('\n') }));
     // Pictures only go to OpenAI-style servers (the one protocol every local server shares); other protocols keep the text.
     const pics = connection.protocol === 'openai-chat' ? images : [];
     messages.push({ role: 'user', content: pics.length ? [{ type: 'text', text: message }, ...pics.map(i => ({ type: 'image_url', image_url: { url: i.url } }))] : message });
     const protocol = connection.protocol;
-    const payload = protocol === 'anthropic'
+    let payload = protocol === 'anthropic'
       ? { model: model.id, messages, system: systemPrompt, max_tokens: 8192, stream: true }
       : protocol === 'openai-responses'
         ? { model: model.id, input: messages, instructions: systemPrompt, stream: true, store: false }
@@ -163,7 +173,19 @@ export function createModelProviders({ directory, changed = () => {}, fetchImpl 
       else payload.reasoning_effort = ({ off: 'none', max: 'high' })[choice] ?? choice;
     }
     const requestSignal = signal ? AbortSignal.any([signal, AbortSignal.timeout(10 * 60 * 1000)]) : AbortSignal.timeout(10 * 60 * 1000);
-    const res = await request(connection, protocol === 'anthropic' ? 'messages' : protocol === 'openai-responses' ? 'responses' : 'chat/completions', { method: 'POST', body: JSON.stringify(payload), signal: requestSignal });
+    if (preparePayload && protocol === 'openai-chat') payload = await preparePayload(payload, {
+      baseUrl: connection.baseUrl, authorization: connection.apiKey ?? '', id: model.id, contextMax: model.contextMax, maxOutput: model.maxOutput,
+    });
+    let res;
+    const send = () => request(connection, protocol === 'anthropic' ? 'messages' : protocol === 'openai-responses' ? 'responses' : 'chat/completions', { method: 'POST', body: JSON.stringify(payload), signal: requestSignal });
+    try { res = await send(); }
+    catch (err) {
+      if (!preparePayload || protocol !== 'openai-chat' || err.code !== 'context-overflow') throw err;
+      requestSignal.throwIfAborted();
+      payload = await preparePayload(payload, { baseUrl: connection.baseUrl, authorization: connection.apiKey ?? '',
+        id: model.id, contextMax: model.contextMax, maxOutput: model.maxOutput, force: true });
+      res = await send();
+    }
     if (!res.body) fail('The model API returned an empty response.');
     onFrame({ type: 'start', model: model.name, contextMax: model.contextMax, demo: false });
     let tokensIn = null, tokensOut = null, textLength = 0, firstToken = null, finished = false;

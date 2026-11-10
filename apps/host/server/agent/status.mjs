@@ -147,6 +147,7 @@ export function withPlainStatus(write, options = {}) {
   reporter.set({ phase: 'starting', code: 'starting', text: 'Starting…' });
   const frame = f => {
     switch (f.type) {
+      case 'status': if (f.phase === 'compacting') { reporter.set(f); return; } break;
       case 'start': reporter.set({ phase: 'waiting', code: 'reading-prompt', text: 'Reading your message…' }); break;
       case 'reasoning': reasoning.add(f.text ?? ''); reporter.set({ phase: 'thinking', code: 'thinking', text: `Thinking… ${fmtTokens(reasoning.tokens)} tokens`, key: 'Thinking… {0} tokens', values: [fmtTokens(reasoning.tokens)], tokens: reasoning.tokens, args: { tokens: reasoning.tokens } }); break;
       case 'delta': reporter.set({ phase: 'answering', code: 'answering', text: 'Writing the answer…' }); break;

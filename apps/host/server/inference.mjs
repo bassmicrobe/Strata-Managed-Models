@@ -15,6 +15,7 @@
 import * as supervisor from './supervisor.mjs';
 import { get as getStore } from './store.mjs';
 import { which } from './util.mjs';
+import { isContextOverflow } from './agent/context-budget.mjs';
 
 /** Where Strata's own API worker listens by default (`serve/server.py`, `--port 8095`). */
 const STRATA_DEFAULT_URL = 'http://127.0.0.1:8095/v1';
@@ -196,7 +197,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /* -------------------------------------------------------------- the stream --- */
 
-export async function streamChat({ message, history = [], systemPrompt = '', modelLabel, onFrame, signal, engine, candidates = [] }) {
+export async function streamChat({ message, history = [], systemPrompt = '', modelLabel, onFrame, signal, engine, candidates = [], preparePayload }) {
   const be = await detectBackend();
 
   if (be.kind === 'strata') {
@@ -210,6 +211,7 @@ export async function streamChat({ message, history = [], systemPrompt = '', mod
       supervised: false,
       engine,
       modelId: be.modelId || 'strata',
+      preparePayload,
     });
   }
 
@@ -223,6 +225,7 @@ export async function streamChat({ message, history = [], systemPrompt = '', mod
       signal,
       supervised: be.kind === 'engine',
       engine,
+      preparePayload,
     });
   }
 
@@ -236,7 +239,7 @@ export async function streamChat({ message, history = [], systemPrompt = '', mod
 
 /* --------------------------------------------------------- real engine path --- */
 
-export async function proxyCompletion({ baseUrl, message, history = [], systemPrompt = '', onFrame, signal, supervised = false, engine,modelId='local',authorization,images=[],extra={} }) {
+export async function proxyCompletion({ baseUrl, message, history = [], systemPrompt = '', onFrame, signal, supervised = false, engine,modelId='local',authorization,images=[],extra={},preparePayload }) {
   const started = Date.now();
   engine?.beginReading(0, engine.variantId);
   const messages = [
@@ -247,19 +250,25 @@ export async function proxyCompletion({ baseUrl, message, history = [], systemPr
 
   const defaults = getStore().expert ?? {};
   const sampling = { temperature: defaults['sample.temp'] ?? 0.6, top_p: defaults['sample.topP'] ?? 0.95, top_k: defaults['sample.topK'] ?? 40, repeat_penalty: defaults['sample.repeat'] ?? 1.05, seed: defaults['sample.seed'] ?? -1, experimental_speed_projection: defaults['sample.speedProjection'] ?? true, ...(Number(defaults['sample.maxTokens']) > 0 ? {max_tokens: Number(defaults['sample.maxTokens'])} : {}) };
-  const res = await fetch(`${baseUrl}/chat/completions`, {
+  let payload = { model: modelId, stream: true, stream_options: { include_usage: true }, ...sampling, ...extra, messages };
+  const key = authorization ?? (supervised ? getStore().serving?.apiKey : '') ?? '';
+  if (preparePayload) payload = await preparePayload(payload, { baseUrl, authorization: key, id: modelId });
+  const send = () => fetch(`${baseUrl}/chat/completions`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', ...(authorization?{authorization:`Bearer ${authorization}`} :supervised && getStore().serving?.apiKey ? { authorization: `Bearer ${getStore().serving.apiKey}` } : {}) },
     signal,
-    body: JSON.stringify({
-      model: modelId,
-      stream: true,
-      stream_options: { include_usage: true },
-      ...sampling,
-      ...extra,
-      messages,
-    }),
+    body: JSON.stringify(payload),
   });
+  let res = await send();
+  if (preparePayload && [400, 413, 422].includes(res.status)) {
+    const detail = await res.clone().text().catch(() => '');
+    if (isContextOverflow({ message: detail })) {
+      await res.body?.cancel().catch(() => {});
+      signal?.throwIfAborted();
+      payload = await preparePayload(payload, { baseUrl, authorization: key, id: modelId, force: true });
+      res = await send();
+    }
+  }
 
   if (!res.ok || !res.body) {
     const detail = await res.text().catch(() => '');

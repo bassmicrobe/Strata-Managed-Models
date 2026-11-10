@@ -137,17 +137,16 @@ test('an ordinary turn whose searches keep failing ends with the plain sentence 
   assert.ok(out.findIndex(f => f.key) < out.findIndex(f => f.type === 'done'), 'the sentence comes before the end of the turn');
 });
 
-test('a context at 100% with no answer is never silent: the plain message comes, and the older messages are summarised', { skip }, async (t) => {
+test('a context at 100% with no answer is summarised and continued automatically', { skip }, async (t) => {
   const r = await rig(t, { context: 32768 });
   const out = [];
   await r.bridge.runTurn({ ...r.base('f1', f => out.push(f)), message: 'SCRIPT:bloat 32000' });
   assert.equal(out.filter(f => f.type === 'error').length, 0);
   assert.ok(out.find(f => f.type === 'done'));
-  assert.equal(out.filter(f => f.type === 'delta' && f.key).at(-1)?.key, GUARD_NOTES.context);
-  assert.match(words(out), /ran out of room/);
-  await new Promise(res => setTimeout(res, 1500));
-  const compacted = r.logs.find(l => /compact after a stopped turn/.test(l));
-  assert.match(compacted ?? '', /compact after a stopped turn: \w+/, `compaction was asked for and the Harness answered (${compacted})`);
+  assert.ok(out.some(f => f.type === 'delta' && /Older messages were summarized/.test(f.key ?? '')));
+  assert.match(words(out), /Continued after automatic context compression/);
+  assert.ok(!out.some(f => f.key === GUARD_NOTES.context), 'no manual continue request');
+  assert.equal(r.worker.requests.filter(q => q.contextContinued).length, 1);
   const out2 = [];
   await r.bridge.runTurn({ ...r.base('f2', f => out2.push(f)), message: 'SCRIPT:bloat 3000' });
   assert.equal(out2.filter(f => f.type === 'delta' && f.key).at(-1)?.key, GUARD_NOTES.empty, 'no words at all, plenty of room: still a message');

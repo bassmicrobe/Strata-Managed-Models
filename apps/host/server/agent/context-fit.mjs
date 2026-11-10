@@ -43,14 +43,14 @@ export function decideFit({ window, pressure = 0, base: given = BASE_TOKENS, mes
  * The model server's count of a text (its tokenizer and chat template), through its Anthropic-style count endpoint.
  * Returns the number, or null when it cannot be had (an old engine, a server that is busy, a timeout): then nothing is blocked.
  */
-export async function countTokens({ baseUrl, key = '', model = '', text, fetchImpl = fetch, timeoutMs = 8000 }) {
+export async function countTokens({ baseUrl, key = '', model = '', text, fetchImpl = fetch, timeoutMs = 8000, signal }) {
   try {
     const root = String(baseUrl ?? '').replace(/\/v1\/?$/, '').replace(/\/$/, '');
     const res = await fetchImpl(`${root}/v1/messages/count_tokens`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', ...(key ? { authorization: `Bearer ${key}`, 'x-api-key': key } : {}) },
       body: JSON.stringify({ model, messages: [{ role: 'user', content: String(text) }] }),
-      signal: AbortSignal.timeout(timeoutMs),
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs),
     });
     if (!res.ok) return null;
     const n = Number((await res.json())?.input_tokens);

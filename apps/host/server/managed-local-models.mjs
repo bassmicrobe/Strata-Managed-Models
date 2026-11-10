@@ -309,5 +309,14 @@ export function createManagedLocalModels({ configPath = process.env.STRATA_MANAG
     } finally { res.off('close', onClose); req.off('aborted', onAborted); }
   }
   return { enabled, publicState, requestSwitch, proxy, providerRegistration,
+    // Host-only tokenizer target. Never included in publicState or serialized.
+    compactionTarget(connection, modelId) {
+      if (connection !== connectionId) return null;
+      const found = models.find(m => m.modelId === modelId);
+      if (!found) return null;
+      const m = effective(found);
+      return { contextMax: contextDefault(m), maxOutput: m.maxOutput, counterBaseUrl: m.baseUrl,
+        counterAuthorization: (backendHeaders(m).authorization ?? '').replace(/^Bearer /i, '') };
+    },
     setConnectionId(id) { connectionId = typeof id === 'string' ? id : null; publish(); } };
 }

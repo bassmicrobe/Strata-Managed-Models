@@ -125,7 +125,7 @@ test('dense text compacts in time: no request is refused, and every message is a
   assert.ok(peak < 32768 - 4000, `no prompt came within 4,000 tokens of the window (peak ${peak})`);
 });
 
-test('a chat the model server refused once is not stuck: the next message compacts (the summary itself fits the window) and goes through', { skip }, async (t) => {
+test('an overflowing turn compacts and answers automatically, then later messages still work', { skip }, async (t) => {
   // (An engine that cannot count a message before it is sent: the check lets it through, and this is the recovery that remains.)
   // 2026-10-22: a 103 KB message made a 70K-token prompt, the 400 left it in the history, and then neither the next message nor /compact
   // could go through, because the summary request carried the same history and was refused for its size too.
@@ -133,13 +133,16 @@ test('a chat the model server refused once is not stuck: the next message compac
   assert.equal((await send(`SCRIPT:echo one ${dense.repeat(300)}`)).at(-1).type, 'done');
   const huge = await send(`SCRIPT:echo two ${dense.repeat(7000)}`);
   assert.equal(huge.at(-1).type, 'done', 'the Harness compacted after the refusal and asked again: ' + JSON.stringify(huge.at(-1)).slice(0, 200));
+  assert.match(answerOf(huge), /Continued after automatic context compression/, 'the failed turn itself is continued without another user message');
+  assert.equal(huge.filter(f => f.type === 'error').length, 0, 'a recovered overflow is not presented as a failed chat');
+  assert.equal(huge.filter(f => f.type === 'done').length, 1);
   const small = await send('SCRIPT:echo three please');
   assert.equal(small.at(-1).type, 'done', JSON.stringify(small.at(-1)).slice(0, 300));
   assert.match(answerOf(small), /three/);
   const again = await send('SCRIPT:echo four please');
   assert.equal(again.at(-1).type, 'done');
   const refused = worker.requests.filter(r => r.refused);
-  assert.equal(refused.length, 1, `only the first, too large, prompt was refused: ${refused.map(r => r.refused).join(', ')}`);
+  assert.equal(refused.length, 2, `the original request and one Harness retry overflowed before bridge recovery: ${refused.map(r => r.refused).join(', ')}`);
   assert.ok(worker.requests.filter(r => r.summary).every(r => Math.round(r.promptChars / 3) < 32768 - 64), 'every summary request fitted the window');
 });
 

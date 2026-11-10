@@ -31,6 +31,7 @@ import { SkillsUsed, skillInfoFrom } from './skills-used.mjs';
 import { turnEngineSpeed } from './engine-speed.mjs';
 import { TurnGuard, guardNote, GUARD_NOTES } from './turn-guard.mjs';
 import { cutNotice, cutNudge } from './reply-cut.mjs';
+import { CONTEXT_CONTINUE, hasKnownContext, needsContextRecovery, recoverContext } from './auto-context.mjs';
 
 /** How often one turn asks the agent to carry on after a reply the length limit cut (each time in smaller pieces). */
 export const MAX_CUT_RETRIES = 2;
@@ -359,8 +360,8 @@ export function createAgentBridge({ dataDir, componentsDir = null, bundledDir = 
     const c = chat(options.chatId);
     if (c.turn || c.starting) throw new AgentUnavailable('This chat is still working. Stop it or wait for it to finish.', 'turn-active');
     // From here until the Harness has the prompt, Stop has no session to cancel; it cancels the start.
-    c.starting = true; c.cancelStart = false;
-    try { return await runTurnInner(c, options); } finally { c.starting = false; }
+    c.starting = true; c.cancelStart = false; c.startAbort = new AbortController();
+    try { return await runTurnInner(c, options); } finally { c.starting = false; c.startAbort.abort(); c.startAbort = null; }
   }
 
   async function runTurnInner(c, { chatId, message, workspacePath, choice = null, mode = null, history = [], onFrame, requestId = `req-${randomUUID()}`, signal, goal = null, thinking = null, thinkingBudget = 0, images = [], planTask = null, planRun = null, researchTopic = null }) {
@@ -372,7 +373,7 @@ export function createAgentBridge({ dataDir, componentsDir = null, bundledDir = 
     const written = { all: '', step: '', reasoning: '' };
     // The frame that closed the turn, kept with the turn's text for a page that comes back after it ended (attach).
     let terminal = null;
-    // The turn guard (turn-guard.mjs): counts failing searches, searches, plan rewrites and a nearly full context. Set up once the route is known.
+    // The turn guard counts failing searches and plan rewrites, and explains an unrecoverable silent answer.
     let guard = null;
     const raw = frame => { if (frame.type === 'done' || frame.type === 'error') terminal = frame; try { send(frame); } catch { send = () => {}; attached = false; } };
     // What the turn made (files) and compact activity lines (notes-split-agent8.md): derived from the cards the turn already sends.
@@ -438,8 +439,10 @@ export function createAgentBridge({ dataDir, componentsDir = null, bundledDir = 
     // Does the message fit the model's window? Asked before anything is sent, with the model server's own count (context-fit.mjs). A message
     // that fits once the older messages are a summary is sent after a summary; one that can never fit is not sent, and the person is told
     // plainly and offered the two ways out. Whatever cannot be counted goes through: the Harness recovers from a refusal by itself.
-    if (!goal && route.kind === 'local') {
-      const fit = await fitCheck({ runtime, route, sessionId, fresh, history, message }).catch(() => null);
+    if (!goal && hasKnownContext(route)) {
+      const preflightSignal = AbortSignal.any([c.startAbort.signal, AbortSignal.timeout(stallMs)]);
+      const fit = await fitCheck({ runtime, route, sessionId, fresh, history, message, signal: preflightSignal }).catch(() => null);
+      if (c.cancelStart) return cancelled();
       if (fit?.action === 'too-large') {
         reporter.clear();
         const values = [grouped(fit.tokens), grouped(fit.window)];
@@ -449,14 +452,15 @@ export function createAgentBridge({ dataDir, componentsDir = null, bundledDir = 
       }
       if (fit?.action === 'summarize') {
         reporter.set({ phase: 'compacting', code: 'compacting', text: FIT_TEXT.summarizing, key: FIT_TEXT.summarizing, values: [] });
-        const done = await compactChat(runtime, sessionId);
-        reporter.clear();
+        const done = await compactChat(runtime, sessionId, preflightSignal);
+        reporter.set({ phase: 'waiting', code: 'reading-prompt', text: 'Reading your message…' });
         if (done.ok) emit(summarizedNote(done.before, done.after, fit.window));
       }
     }
+    if (c.cancelStart) return cancelled();
 
     const projector = new TurnProjector({ policy: MODE_PRESETS[appliedMode].approval, window: route.contextWindow });
-    if (!goal) guard = new TurnGuard({ plan: !!planTask, contextMax: route.kind === 'local' ? route.contextWindow : 0 });   // a saved connection's window is often only assumed: never judged by a guess
+    if (!goal) guard = new TurnGuard({ plan: !!planTask, contextMax: hasKnownContext(route) ? route.contextWindow : 0 });
     projector.onStatus = update => { if (!turn?.parentOpen && turn?.children.size && [...turn.children.values()].some(h => !h.done) && update.phase === 'waiting') return; reporter.set(update); };
     const turn = {
       sessionId, projector, route, requestId, live: false, lastSeq: -1,
@@ -466,6 +470,7 @@ export function createAgentBridge({ dataDir, componentsDir = null, bundledDir = 
       children: new Map(), subagentCalls: new Map(), parentOpen: false, stopping: false, settleTimer: null, mode: appliedMode,
       plan: null, advancing: false, goalRun: false, lastActivity: Date.now(), heard: Date.now(), engineMark: null, watchdog: null,
       research: researchTopic ? { phase: 'gather', nudged: false, waitingStart: false } : null,
+      contextRecovery: { attempts: 0, running: false }, contextAbort: new AbortController(), contextWaiting: false,
     };
     c.turn = turn;
     if (workspacePath) folderClaims.begin(workspacePath, chatId);
@@ -510,6 +515,7 @@ export function createAgentBridge({ dataDir, componentsDir = null, bundledDir = 
     async function finishTurn(failure) {
       if (turn.finished) return;
       turn.finished = true;
+      turn.contextAbort.abort();
       for (const [k, v] of questions) if (v.sessionId === turn.sessionId) questions.delete(k);
       clearTimeout(turn.settleTimer);
       clearInterval(turn.watchdog);
@@ -553,8 +559,10 @@ ${note.text}`, key: note.key, values: note.values, noteReason: 'cut' });
       c.last = { requestId, sessionId, mode: appliedMode, model: route.name, contextMax: route.contextWindow, remoteModel: route.kind === 'api', content: hideDeltas ? '' : written.all.slice(0, 4_000_000), reasoning: written.reasoning, cards: [...projector.tools.values()].filter(t => t.card).map(t => t.card), terminal };
       turn.ended.resolve({ reason: projector.ended, failure: failure ?? null });
       notifyIdle();
-      // A turn that filled the context, or that the guard stopped, leaves a long history behind: summarise the older part now so the next message has room.
-      if (noteReason === 'context' || noteReason === 'searches' || noteReason === 'searches-failed' || noteReason === 'rewrites' || /context window|too long|exceeds/i.test(String(projector.ended?.error?.message ?? ''))) void compactSession(runtime, sessionId);
+      // A guard-stopped turn can leave a long history behind. Do not repeat a
+      // failed recovery in the background, or start more work after manual Stop.
+      if (!turn.contextRecovery.attempts && (!turn.stopping || turn.guard) &&
+        (noteReason === 'context' || noteReason === 'searches' || noteReason === 'searches-failed' || noteReason === 'rewrites' || /context window|too long|exceeds/i.test(String(projector.ended?.error?.message ?? '')))) void compactSession(runtime, sessionId);
     }
 
     emit({ type: 'start', model: route.name, contextMax: route.contextWindow, demo: false, remoteModel: route.kind === 'api', agent: true, mode: appliedMode, sessionId, requestId, skills: [], ...(planTask ? { planning: true } : {}) });
@@ -596,7 +604,9 @@ ${note.text}`, key: note.key, values: note.values, noteReason: 'cut' });
         }
       } else if (!turn.live) return;
       for (const f of projector.consume(item)) emit(f);
-      if (guard && projector.contextTokens != null) trip(guard.context(projector.contextTokens));
+      // The Harness compacts between steps and retries context overflow itself.
+      // Cancelling here at 93% used to preempt that recovery, including when a
+      // compaction/start event still carried the preceding request's usage.
       if (item.type === 'event') watchParent(item.event);
     }
 
@@ -653,6 +663,7 @@ ${note.text}`, key: note.key, values: note.values, noteReason: 'cut' });
           turn.parentOpen = true;
           if (turn.research) turn.research.waitingStart = false;
           turn.cutWaiting = false;
+          turn.contextWaiting = false;
           clearTimeout(turn.settleTimer);
           // After Stop, a helper's report would start a new turn that nobody asked for.
           if (turn.stopping) void runtime.gw.rpc('session/cancel', { request: { sessionId } }).catch(() => {});
@@ -795,7 +806,7 @@ ${note.text}`, key: note.key, values: note.values, noteReason: 'cut' });
       clearTimeout(turn.settleTimer);
       if (turn.finished) return;
       turn.settleTimer = after(turn.stopping ? 1200 : turn.children.size ? 600 : 0, async () => {
-        if (turn.finished || turn.parentOpen || turn.advancing) return;
+        if (turn.finished || turn.parentOpen || turn.advancing || turn.contextRecovery.running) return;
         const open = [...turn.children.values()];
         if (open.some(c => !c.done)) return;
         if (!turn.stopping) {
@@ -804,6 +815,31 @@ ${note.text}`, key: note.key, values: note.values, noteReason: 'cut' });
           const current = await goalGet();
           if (turn.finished || turn.parentOpen) return;
           if (current && current.phase === 'active' && current.activation === 'armed') { turn.settleTimer = after(700, armSettle); return; }
+          if (turn.contextWaiting) { turn.settleTimer = after(300, armSettle); return; }
+          if (!turn.goalRun && needsContextRecovery({ ended: projector.ended, wrote: projector.emittedAny,
+            tokens: projector.contextTokens, window: hasKnownContext(route) ? route.contextWindow : 0 })) {
+            const recovered = await recoverContext({ state: turn.contextRecovery,
+              stopped: () => turn.stopping || turn.finished || turn.contextAbort.signal.aborted,
+              compact: async () => {
+                reporter.set({ phase: 'compacting', code: 'compacting', text: FIT_TEXT.summarizing, key: FIT_TEXT.summarizing, values: [] });
+                return compactChat(runtime, sessionId, turn.contextAbort.signal);
+              },
+              resume: async done => {
+                emit(summarizedNote(done.before, done.after, route.contextWindow));
+                const previousEnd = projector.ended;
+                for (const f of projector.clearCut()) emit(f);
+                turn.contextWaiting = true;
+                try { await runtime.gw.rpc('session/prompt', { request: { requestId: `context-${randomUUID()}`, sessionId,
+                  mode: 'queue', content: [{ type: 'text', text: CONTEXT_CONTINUE }] } }, { signal: turn.contextAbort.signal }); }
+                catch (error) { turn.contextWaiting = false; if (!turn.parentOpen) projector.ended = previousEnd; throw error; }
+              },
+            });
+            if (turn.finished || turn.stopping) return;
+            if (recovered.resumed) { turn.settleTimer = after(500, armSettle); return; }
+            reporter.clear();
+            finishTurn(null);
+            return;
+          }
           // A reply the length limit cut (AGENT-LOST): the agent lost what it was writing. Say so in the chat and ask it to carry on in smaller pieces, twice at most.
           if (turn.cutWaiting) { turn.settleTimer = after(300, armSettle); return; }
           if (projector.ended?.kind === 'max-tokens' && !turn.goalRun && !turn.stopping && (turn.cuts ?? 0) < MAX_CUT_RETRIES) {
@@ -1305,9 +1341,9 @@ ${note.text}
    * Harness acknowledges a cancel as admitted, not as done.
    */
   /** What the chat holds now and the model's window, as the context plugin measures them (null when it cannot be read). */
-  async function contextOf(runtime, sessionId) {
+  async function contextOf(runtime, sessionId, signal) {
     try {
-      const r = await runtime.gw.rpc('commands/execute', { agentId: sessionId, line: '/strata-context', submittedAttachments: [] });
+      const r = await runtime.gw.rpc('commands/execute', { agentId: sessionId, line: '/strata-context', submittedAttachments: [] }, { signal });
       if (r?.result?.kind !== 'success') return null;
       const v = JSON.parse(String(r.result.text));
       return Number.isFinite(v.tokens) ? { tokens: Math.round(v.tokens), window: Number(v.window) > 0 ? Math.round(v.window) : 0 } : null;
@@ -1315,15 +1351,17 @@ ${note.text}
   }
 
   /** The decision of context-fit.mjs for the message about to be sent, or null when the model server cannot count it. */
-  async function fitCheck({ runtime, route, sessionId, fresh, history, message }) {
-    const inst = localInstances().find(i => i.id === route.instanceId);
+  async function fitCheck({ runtime, route, sessionId, fresh, history, message, signal }) {
+    const connection = route.kind === 'api' && connections().find(c => c.id === route.connectionId);
+    const inst = route.kind === 'local' ? localInstances().find(i => i.id === route.instanceId)
+      : connection ? { baseUrl: connection.baseUrl, key: connection.apiKey, modelId: route.modelId } : null;
     if (!inst || !(route.contextWindow > 0)) return null;
     const carried = fresh && history.length ? withEarlierConversation(history, message) : message;
     if (carried.length < COUNT_ABOVE_CHARS) return null;
-    const count = text => countTokens({ baseUrl: inst.baseUrl, key: inst.key, model: inst.modelId, text });
+    const count = text => countTokens({ baseUrl: inst.baseUrl, key: inst.key, model: inst.modelId, text, signal });
     let tokens = await count(carried);
     if (tokens == null) return null;
-    const now = fresh ? null : await contextOf(runtime, sessionId);
+    const now = fresh ? null : await contextOf(runtime, sessionId, signal);
     const window = now?.window || route.contextWindow;
     const pressure = now?.tokens ?? 0;
     // Where the Harness starts summarising by itself on this window (profile.mjs: the reply keeps its room, then the headroom).
@@ -1342,14 +1380,14 @@ ${note.text}
    * Summarise the older part of a chat with the Harness's /compact and say what happened. Never throws.
    * ok:true carries the figures before and after; ok:false says why (nothing to summarise, busy, failed).
    */
-  async function compactChat(runtime, sessionId) {
-    const before = await contextOf(runtime, sessionId);
+  async function compactChat(runtime, sessionId, signal) {
+    const before = await contextOf(runtime, sessionId, signal);
     let result;
-    try { result = (await runtime.gw.rpc('commands/execute', { agentId: sessionId, line: '/compact', submittedAttachments: [] }))?.result; }
+    try { result = (await runtime.gw.rpc('commands/execute', { agentId: sessionId, line: '/compact', submittedAttachments: [] }, { signal }))?.result; }
     catch (e) { return { ok: false, reason: /not.found|no such/i.test(String(e.message)) ? 'nothing' : 'failed', before, text: String(e.message ?? e) }; }
     const text = String(result?.text ?? '');
     log('agent · compact: ' + (result?.kind ?? 'none') + ' ' + text.slice(0, 140));
-    if (result?.kind === 'success' && /^Compacted/i.test(text)) return { ok: true, before, after: await contextOf(runtime, sessionId) };
+    if (result?.kind === 'success' && /^Compacted/i.test(text)) return { ok: true, before, after: await contextOf(runtime, sessionId, signal) };
     if (result?.kind === 'success') return { ok: false, reason: 'nothing', before, text };
     if (/active compaction|not idle/i.test(text)) return { ok: false, reason: 'busy', before, text };
     // The Harness cannot make a summary smaller than what is left when the chat holds little beyond its first prompt: that is nothing to summarise, not a failure.
@@ -1402,7 +1440,7 @@ ${note.text}
   async function stop(chatId, { waitMs = 20_000 } = {}) {
     const c = chats.get(chatId);
     const turn = c?.turn;
-    if (!turn && c?.starting) { c.cancelStart = true; return { stopped: true, ended: 'cancelled-before-start', ms: 0 }; }
+    if (!turn && c?.starting) { c.cancelStart = true; c.startAbort?.abort(); return { stopped: true, ended: 'cancelled-before-start', ms: 0 }; }
     if (!turn || !rt) return { stopped: false, reason: 'no active turn' };
     const t0 = Date.now();
     if (!turn.prompted) {
@@ -1412,6 +1450,7 @@ ${note.text}
       if (early) return { stopped: true, ended: early.reason?.kind ?? 'aborted', ms: Date.now() - t0 };
     }
     turn.stopping = true;
+    turn.contextAbort?.abort();
     await pauseGoal(rt, turn.sessionId, chatId);
     // Helpers first: a helper still working would otherwise report back and wake the parent again.
     await Promise.allSettled([...turn.children.values()].filter(h => !h.done).map(h => rt.gw.rpc('subagents/interruptByParent', { childSessionId: h.id, parentSessionId: turn.sessionId, mode: 'continuable' })));

@@ -196,6 +196,7 @@ export async function main() {
   await runNpm(['ci', '--ignore-scripts', '--no-audit', '--no-fund']);
   await runNpm(['run', 'typecheck']); await runNpm(['run', 'build']);
   await command(process.execPath, ['--test', 'server/managed-local-models.test.mjs', 'server/update-maintenance.test.mjs', 'server/tailscale-access.test.mjs', 'tests/managed-models-client.test.mjs', 'tests/native-picker.test.mjs', 'tests/model-picker.test.mjs'], { cwd: host });
+  await command(process.execPath, ['--test', 'server/chat-compaction.test.mjs', 'tests/chat-compaction-transport.test.mjs', 'tests/chat-history.test.mjs', 'tests/agent-auto-context.test.mjs'], { cwd: host });
   const installerTests=readdirSync(join(root,'managed-local/windows-installer')).filter(name=>name.endsWith('.test.mjs')).map(name=>'managed-local/windows-installer/'+name);
   if(installerTests.length)await command(process.execPath,['--test',...installerTests],{cwd:root});
   const files = await git(['ls-files', '-z', '--', 'apps/host', 'LICENSE', 'NOTICE', 'NOTICE.md']);

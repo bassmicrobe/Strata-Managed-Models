@@ -284,7 +284,7 @@ export function buildProfile({ local = [], connections = [], gate = true, tools 
     const fp = fingerprint(providers[route], conn.apiKey ?? '');
     const shaped = ownServer ? addShaped(route, providers[route], baseURL) : null;
     for (const m of conn.models) { const ctx = m.contextMax ?? ASSUMED_API_CONTEXT; compaction.push({ provider: route, model: m.id, headroomTokens: compactionHeadroom(ctx, reply(m)) }); }
-    for (const m of conn.models) routes.push({ route, fp, kind: 'api', connectionId: conn.id, connectionName: conn.name, modelId: m.id, name: m.name || m.id, contextWindow: m.contextMax ?? ASSUMED_API_CONTEXT, ...(shaped ? { shaped } : {}) });
+    for (const m of conn.models) routes.push({ route, fp, kind: 'api', connectionId: conn.id, connectionName: conn.name, modelId: m.id, name: m.name || m.id, contextWindow: m.contextMax ?? ASSUMED_API_CONTEXT, contextKnown: Number.isFinite(m.contextMax) && m.contextMax > 0, ...(shaped ? { shaped } : {}) });
   });
 
   // The model the chat really runs on is the default instance, not whichever one was loaded first (T5: with two models loaded, the tool servers of the

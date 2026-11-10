@@ -43,6 +43,16 @@ export function hostEnvironment(paths,active,port,{profile=paths.profile,smoke=f
   Object.assign(env,{STRATA_HOME:profile,STRATA_DATA_DIR:paths.dataRoot,STRATA_STATE_DIR:join(paths.dataRoot,'state'),STRATA_COMPONENTS_DIR:join(paths.dataRoot,'components'),STRATA_CONTROL_DIR:paths.control,STRATA_INSTALL_DIR:join(paths.dataRoot,'install'),STRATA_PROFILE_DIR:join(paths.dataRoot,'profiles'),STRATA_RUNTIME_DIR:join(paths.dataRoot,'runtime'),STRATA_SETTINGS_FILE:join(paths.dataRoot,'app-settings.json'),STRATA_MODELS_DIR:join(paths.dataRoot,'models'),STRATA_WORKSPACE:join(paths.dataRoot,'Workspace'),STRATA_REAL_ENGINE:'1',STRATA_NO_ACQUIRE:'1',STRATA_APP_VERSION:active.version,STRATA_PORT:String(port),STRATA_BIND:'127.0.0.1',STRATA_UPDATE_MAINTENANCE_FILE:paths.maintenanceFile,STRATA_NO_BUNDLED_ENGINE:'1',STRATA_NO_REPAIR_ACCESS:'1'});
   env.STRATA_HARNESS_DIR=join(paths.appRoot,'resources/harness');
   const managed=join(paths.dataRoot,'managed-models.json');if(managedModels&&existsSync(managed))env.STRATA_MANAGED_MODELS_CONFIG=managed;
+  if(env.STRATA_MANAGED_MODELS_CONFIG){
+    const preload=json(env.STRATA_MANAGED_MODELS_CONFIG).compactionPreload;
+    if(typeof preload==='string'&&isAbsolute(preload)&&existsSync(preload)){
+      const option='--import='+pathToFileURL(preload).href;
+      // New hosts compact chats themselves. Keep the saved adapter for a rollback,
+      // but do not import it on top of the bundled implementation.
+      if(existsSync(join(active.hostRoot,'server/chat-compaction.mjs'))){if(env.NODE_OPTIONS===option)delete env.NODE_OPTIONS;}
+      else env.NODE_OPTIONS=option;
+    }
+  }
   if(!smoke){const origin=paths.tailscaleOrigin??readTailscaleConfig(paths.dataRoot)?.url;if(origin)env.STRATA_TAILSCALE_ORIGIN=tailscaleOrigin(origin);}
   if(smoke)env.STRATA_SETTINGS_FILE=join(dirname(profile),'app-settings.json');
   return env;
@@ -75,11 +85,6 @@ async function startHost(paths,active,{profile=paths.profile,smoke=false,managed
   const logs=join(paths.dataRoot,'logs');mkdirSync(logs,{recursive:true});
   const suffix=smoke?'-smoke-'+randomUUID().slice(0,8):'',out=openSync(join(logs,'host'+suffix+'.stdout.log'),'a',0o600),err=openSync(join(logs,'host'+suffix+'.stderr.log'),'a',0o600);
   const env=hostEnvironment(paths,active,port,{profile,smoke,managedModels});
-  if(env.STRATA_MANAGED_MODELS_CONFIG){
-    // An explicit adapter in the user's existing local file, retained across host and installer upgrades.
-    const preload=json(env.STRATA_MANAGED_MODELS_CONFIG).compactionPreload;
-    if(typeof preload==='string'&&isAbsolute(preload)&&existsSync(preload))env.NODE_OPTIONS='--import='+pathToFileURL(preload).href;
-  }
   env.STRATA_SHUTDOWN_TOKEN=randomUUID()+randomUUID();
   const child=spawn(paths.node,[entry,'--dist',join(active.hostRoot,'dist')],{cwd:active.hostRoot,detached:true,windowsHide:true,env,stdio:['ignore',out,err]});closeSync(out);closeSync(err);let failed;child.once('error',error=>{failed=error;});child.unref();
   let actual=null;for(let i=0;i<10&&!actual;i++){if(failed||child.exitCode!==null)throw fail('The Strata host could not start.');actual=await processIdentity(child.pid);if(!actual)await sleep(200);}

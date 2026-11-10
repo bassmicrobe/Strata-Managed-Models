@@ -5,6 +5,7 @@ import {tmpdir} from 'node:os';
 import {join,resolve,dirname,delimiter} from 'node:path';
 import {spawn,execFileSync} from 'node:child_process';
 import {createServer} from 'node:net';
+import {pathToFileURL} from 'node:url';
 import {layout,hostEnvironment,releaseIsNew,bundledIsNewer,validateActive,isBusy,ownsProcess,processIdentity,main,stopHost} from './runtime/runtime.mjs';
 
 const read=file=>JSON.parse(readFileSync(file,'utf8'));
@@ -60,6 +61,29 @@ test('fresh package routes every model, profile and component setting to its own
     assert.equal(hostEnvironment(f.paths,f.active,8792,{smoke:true}).STRATA_MANAGED_MODELS_CONFIG,undefined);
     assert.equal(hostEnvironment(f.paths,f.active,8792,{smoke:true,managedModels:true}).STRATA_MANAGED_MODELS_CONFIG,join(f.dataRoot,'managed-models.json'));
   }finally{if(old===undefined)delete process.env.STRATA_MANAGED_MODELS_CONFIG;else process.env.STRATA_MANAGED_MODELS_CONFIG=old;}
+});
+test('bundled compaction replaces the legacy preload and rollback retains the untouched adapter setting',()=>{
+  const f=fixture({unicode:true}),preload=join(f.dataRoot,'legacy-summary.mjs'),config=join(f.dataRoot,'managed-models.json');
+  writeFileSync(preload,'throw new Error("The legacy compactor must not load in a new host.");');
+  const saved=JSON.stringify({compactionPreload:preload,models:[{id:'saved-model'}]});writeFileSync(config,saved);
+  const option='--import='+pathToFileURL(preload).href,old=process.env.NODE_OPTIONS;
+  try{
+    delete process.env.NODE_OPTIONS;
+    assert.equal(hostEnvironment(f.paths,f.active,8792).NODE_OPTIONS,option);
+    const bundled=join(f.active.hostRoot,'server/chat-compaction.mjs');writeFileSync(bundled,'// bundled compaction');
+    const env=hostEnvironment(f.paths,f.active,8792);assert.equal(env.NODE_OPTIONS,undefined);
+    assert.equal(execFileSync(process.execPath,['-e','process.stdout.write("ready")'],{env,encoding:'utf8',windowsHide:true}),'ready');
+    process.env.NODE_OPTIONS=option;
+    assert.equal(hostEnvironment(f.paths,f.active,8792).NODE_OPTIONS,undefined);
+    process.env.NODE_OPTIONS='--no-warnings';assert.equal(hostEnvironment(f.paths,f.active,8792).NODE_OPTIONS,'--no-warnings');
+    unlinkSync(bundled);assert.equal(hostEnvironment(f.paths,f.active,8792).NODE_OPTIONS,option);
+    assert.equal(readFileSync(config,'utf8'),saved);
+  }finally{if(old===undefined)delete process.env.NODE_OPTIONS;else process.env.NODE_OPTIONS=old;}
+});
+test('a fresh bundled host needs no PC-specific preload configuration',()=>{
+  const f=fixture();writeFileSync(join(f.active.hostRoot,'server/chat-compaction.mjs'),'// bundled compaction');
+  const env=hostEnvironment(f.paths,f.active,8792);assert.equal(env.STRATA_MANAGED_MODELS_CONFIG,undefined);
+  assert(!existsSync(join(f.dataRoot,'managed-models.json')));
 });
 test('releases advance by numeric upstream version or fork build and never downgrade an installed setup',()=>{
   const active={version:'0.2.12',releaseTag:'managed-v0.2.12-9'};

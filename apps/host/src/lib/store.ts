@@ -2004,13 +2004,14 @@ export async function sendMessage(text: string, options: { fromLoop?: boolean; g
 
      The context meter was reading the same empty array, which is why it sat at
      ~350 tokens however long the conversation grew. */
-  const prior = (state.sessions.find((s) => s.id === sessionId)?.messages ?? [])
+  const fullPrior = (state.sessions.find((s) => s.id === sessionId)?.messages ?? [])
     .filter(m => !m.timeSkipId && !m.local)
     .filter((m) => m.role === 'user' || m.role === 'assistant')
     .filter((m) => m.content.trim())
-    .map((m) => ({ role: m.role, content: m.content,photos:m.photos }))
-    // Bounded so a long conversation cannot send an unbounded body.
-    .slice(-40);
+    .map((m) => ({ id: m.id, role: m.role, content: m.content,photos:m.photos }));
+  // The host reads the older saved prefix by revision; these forty messages are
+  // only the image-aware transport tail, not the model's whole conversation.
+  let prior = fullPrior.slice(-40);
 
   patchSession(sessionId, (s) => reattach ? ({
     ...s,
@@ -2039,7 +2040,7 @@ export async function sendMessage(text: string, options: { fromLoop?: boolean; g
 
   const started = performance.now();
 
-  const imageSlots=photoHistorySlots(prior,pictures.length);
+  let imageSlots=photoHistorySlots(prior,pictures.length);
   /* Text and reasoning arrive token by token (90 a second or more). Drawing the whole answer again for each one made the page do more work for every
      word the longer the answer grew (measured: 15.7 s of main-thread time for 24 s of a 40,000-token answer), until the page stopped answering
      and ran out of memory. The pieces are gathered and applied together about ten times a second; any other frame, the end and a failure
@@ -2058,6 +2059,13 @@ export async function sendMessage(text: string, options: { fromLoop?: boolean; g
     waitingTimer ??= setTimeout(flushWaiting, 90);
   };
   try {
+    // A long conversation lives on the host. Pin the saved prefix to a revision
+    // so another window cannot silently substitute a different chat history.
+    const savedHistory = !reattach ? await flushSessions() : null;
+    const historyRev = sessionWriter.rev(sessionId);
+    const historyRef = !planStart && savedHistory?.ok && historyRev > 0 && prior.length
+      ? { rev: historyRev, startId: prior[0].id, endId: prior[prior.length - 1].id } : undefined;
+    if (!historyRef) { prior = fullPrior; imageSlots = photoHistorySlots(prior, pictures.length); }
     await streamPost(
       reattach ? '/api/chat/attach' : planStart ? '/api/plan/start-goal' : '/api/chat/stream',
       reattach ? { sessionId, ...(options.requestId ? { requestId: options.requestId } : {}) } : {
@@ -2065,6 +2073,7 @@ export async function sendMessage(text: string, options: { fromLoop?: boolean; g
         ...(planStart ? { planId: planStart } : {}),
         ...(resume ? { goalAction: 'resume' } : planStart ? {} : { message: options.shown ? body : body }),
         history:await Promise.all(prior.map(async(m,index)=>{const included=pictureCheck.ok?(m.photos??[]).filter((_,p)=>imageSlots.has(`${index}:${p}`)):[];const omitted=(m.photos??[]).filter(p=>!included.includes(p));const text=m.content+(omitted.length?`\n[Earlier pictures: ${omitted.map(p=>p.name).join(', ')}. Their pixels are outside this model's image context; ask to reattach them if needed.]`:'');return {role:m.role,content:included.length?[{type:'text',text},...await Promise.all(included.map(async photo=>({type:'image_url',image_url:{url:(await photoData(photo)).url}})))]:text};})),
+        ...(historyRef ? { historyRef } : {}),
         model: state.library?.loaded ?? state.library?.current ?? null,
         remoteModel: state.remoteModel,
         nativeModelId:nativeState()?.instances.length?nativeState()?.defaultId:undefined,
@@ -2186,6 +2195,13 @@ export async function sendMessage(text: string, options: { fromLoop?: boolean; g
             tps: typeof frame.tps === 'number' ? frame.tps : m.tps,
             promptTps: typeof frame.promptTps === 'number' ? frame.promptTps : m.promptTps,
           }));
+        } else if (type === 'compaction') {
+          const before = Number(frame.beforeTokens), after = Number(frame.afterTokens), max = Number(frame.contextMax);
+          if (Number.isFinite(before) && Number.isFinite(after) && max > 0) {
+            applyDelta('\n\n' + tr('Older messages were summarized to make room. The chat was {0}% full and is now {1}% full.',
+              [Math.round(before / max * 100), Math.round(after / max * 100)]) + '\n\n');
+            patchAssistant(m => ({ ...m, contextUsed: after, contextMax: max }));
+          }
         } else if (type === 'context') {
           // What the context holds after each model request of an agent turn: the meter follows the turn instead of waiting for its end.
           const used = Number(frame.contextTokens), max = Number(frame.contextMax);
