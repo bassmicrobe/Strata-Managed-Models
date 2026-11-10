@@ -19,7 +19,7 @@ function fixture({unicode=false}={}){
   return {root,appRoot,dataRoot,paths:layout({appRoot,dataRoot}),active:{version:'0.2.12',commit:'a'.repeat(40),releaseTag:'managed-v0.2.12-4',hostRoot:join(appRoot,'host')}};
 }
 function prepareNode(f){try{linkSync(process.execPath,f.paths.node);}catch{copyFileSync(process.execPath,f.paths.node);}writeFileSync(join(f.paths.host,'server/private-file.mjs'),'export function makePrivateDir(){}');}
-function fakeHost(f,{busy=false,instance=false,agentBusy=false}={}){
+function fakeHost(f,{busy=false,instance=false,agentBusy=false,managed=false}={}){
   writeFileSync(join(f.paths.host,'server/index.mjs'),`import http from 'node:http';import{writeFileSync,readFileSync}from'node:fs';import{join,dirname}from'node:path';let busy=${busy},instance=${instance},agentBusy=${agentBusy};
 const chats=new Map(),folders=new Map(),workspaces=[];
 const native=()=>({available:true,instances:instance?[{id:'fixture-model',status:'ready',model:'user-choice'}]:[],jobs:[],capabilities:{componentUpdates:true}});
@@ -34,6 +34,7 @@ if(path==='/api/native')value=native();
 else if(path==='/api/serving')value={stats:{running:0,waiting:0}};
 else if(path==='/api/update-maintenance')value={enabled:true,active:!!current,activeRequests:busy?1:0};
 else if(path==='/api/agent/status')value={state:'idle',activeTurns:agentBusy?1:0};
+else if(path==='/api/managed-models')value={enabled:${managed},activeIds:${managed ? "['saved-model']" : '[]'},activeRequests:0,queuedRequests:0,switching:false};
 else if(path==='/api/model-providers')value={connections:[]};
 else if(path==='/api/chats')value={chats:[...chats.values()]};
 else if(path.startsWith('/api/chats/')){const id=path.slice('/api/chats/'.length);if(req.method==='PUT'){chats.set(id,body);value={ok:true};}else if(chats.has(id))value={session:chats.get(id)};else{res.writeHead(404);res.end();return;}}
@@ -166,6 +167,22 @@ test('stop-models refuses active inference, then unloads the models while the sa
     await fetch(endpoint('/clear')).catch(()=>{});
     await stopHost(f.paths);
   }
+});
+test('full shutdown stops saved managed models before closing the host and preserves failures', {skip:process.platform!=='win32',timeout:90000},async()=>{
+  const f=fixture();prepareNode(f);fakeHost(f,{managed:true});
+  const marker=join(f.dataRoot,'saved-model-stopped.json');
+  writeFileSync(join(f.dataRoot,'managed-models.json'),JSON.stringify({stopCommand:{marker,fail:true}}));
+  writeFileSync(join(f.paths.host,'server/managed-local-models.mjs'),`import{writeFileSync}from'node:fs';export async function runManagedCommand(command){if(command.fail)throw new Error('fixture model stop refused');writeFileSync(command.marker,JSON.stringify({stopped:true}));}`);
+  const running=await main(['--desktop','--no-browser','--no-update'],{appRoot:f.appRoot,dataRoot:f.dataRoot});
+  try{
+    await assert.rejects(()=>stopHost(f.paths),/fixture model stop refused/);
+    assert.equal((await processIdentity(running.pid))?.pid,running.pid);
+    assert(!existsSync(join(f.dataRoot,'shutdown.json')));assert(!existsSync(f.paths.maintenanceFile));
+    writeFileSync(join(f.dataRoot,'managed-models.json'),JSON.stringify({stopCommand:{marker,fail:false}}));
+    await stopHost(f.paths);
+    assert.equal(read(marker).stopped,true);assert.equal(read(join(f.dataRoot,'shutdown.json')).guarded,true);
+    assert.equal(await processIdentity(running.pid),null);assert(!existsSync(f.paths.maintenanceFile));
+  }finally{try{process.kill(running.pid);}catch{}}
 });
 test('Windows PowerShell CIM preserves Japanese and spaced process paths for owned-host shutdown', {skip:process.platform!=='win32',timeout:90000},async()=>{
   const f=fixture({unicode:true});prepareNode(f);fakeHost(f);const chosen=await port(),entry=join(f.paths.host,'server/index.mjs');

@@ -92,8 +92,38 @@ struct State {
     url: Mutex<Option<Url>>,
     shared: Mutex<Option<Url>>,
     busy: AtomicBool,
+    close_requested: AtomicBool,
     mode: Mode,
     last_prompted: Mutex<Option<String>>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum CloseAction { Managed, Local, WindowOnly, Ignore }
+
+fn close_action(mode: Mode, managed: bool, local_stop: bool, local_origin: bool) -> CloseAction {
+    if mode != Mode::View { CloseAction::Ignore }
+    else if managed { CloseAction::Managed }
+    else if local_stop && local_origin { CloseAction::Local }
+    else { CloseAction::WindowOnly }
+}
+
+fn closing_title(app: &AppHandle, closing: bool) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.set_title(if closing { "Strata — モデルを停止しています…" } else { TITLE });
+    }
+}
+
+fn request_close(app: &AppHandle) {
+    let state = app.state::<State>();
+    let local = state.url.lock().ok().and_then(|url| url.as_ref().map(loopback)).unwrap_or(false);
+    let action = close_action(state.mode, state.launcher.is_some(), state.stop_models.is_some(), local);
+    if action == CloseAction::Ignore || state.close_requested.swap(true, Ordering::AcqRel) { return; }
+    match action {
+        CloseAction::Managed => helper(app, "close-window", &["--stop", "--wait"]),
+        CloseAction::Local => stop_local_models(app, true),
+        CloseAction::WindowOnly => app.exit(0),
+        CloseAction::Ignore => {},
+    }
 }
 
 fn same_origin(a: &Url, b: &Url) -> bool { a.origin() == b.origin() }
@@ -167,7 +197,12 @@ fn prompt_update(app: &AppHandle, update: Option<(String, String)>, force: bool)
 fn helper(app: &AppHandle, action: &'static str, args: &'static [&'static str]) {
     let state = app.state::<State>();
     let Some(launcher) = state.launcher.clone() else { return; };
-    if state.busy.swap(true, Ordering::AcqRel) { message("Strata は起動または更新を処理中です。", false); return; }
+    if state.busy.swap(true, Ordering::AcqRel) {
+        if action == "close-window" { state.close_requested.store(false, Ordering::Release); }
+        message("Strata は起動または更新を処理中です。完了後にもう一度お試しください。", false);
+        return;
+    }
+    if action == "close-window" { closing_title(app, true); }
     let data = state.data.clone(); let app = app.clone();
     std::thread::spawn(move || {
         let result = Command::new(launcher).args(args).arg("--desktop-bridge")
@@ -181,9 +216,13 @@ fn helper(app: &AppHandle, action: &'static str, args: &'static [&'static str]) 
         let ui = app.clone();
         let _ = app.run_on_main_thread(move || {
             let state = ui.state::<State>(); state.busy.store(false, Ordering::Release);
+            if action == "close-window" {
+                state.close_requested.store(false, Ordering::Release);
+                closing_title(&ui, false);
+            }
             match result {
                 Ok(value) if value.cancelled == Some(true) => {},
-                Ok(_) if action == "quit" => ui.exit(0),
+                Ok(_) if action == "close-window" => ui.exit(0),
                 Ok(_) if action == "download" => {},
                 Ok(_) if action == "stop-models" => message("モデルを停止しました。再開するには、使うモデルを選んでください。", false),
                 Ok(value) => {
@@ -207,14 +246,16 @@ fn helper(app: &AppHandle, action: &'static str, args: &'static [&'static str]) 
     });
 }
 
-fn stop_local_models(app: &AppHandle) {
+fn stop_local_models(app: &AppHandle, close_after: bool) {
     let state = app.state::<State>();
     let Some(script) = state.stop_models.clone() else { return; };
     if !state.url.lock().ok().and_then(|url| url.as_ref().map(loopback)).unwrap_or(false) { return; }
     if state.busy.swap(true, Ordering::AcqRel) {
+        if close_after { state.close_requested.store(false, Ordering::Release); }
         message("モデルの停止処理が進行中です。", false);
         return;
     }
+    if close_after { closing_title(app, true); }
     let app = app.clone();
     std::thread::spawn(move || {
         let status = Command::new("node.exe").arg(script)
@@ -223,9 +264,14 @@ fn stop_local_models(app: &AppHandle) {
         let ui = app.clone();
         let _ = app.run_on_main_thread(move || {
             ui.state::<State>().busy.store(false, Ordering::Release);
+            if close_after {
+                ui.state::<State>().close_requested.store(false, Ordering::Release);
+                closing_title(&ui, false);
+            }
             match status {
+                Some(0) if close_after => ui.exit(0),
                 Some(0) => message("モデルを停止しました。再開するには、使うモデルを選んでください。", false),
-                Some(10) => message("回答やモデル操作が完了してから、もう一度停止してください。", false),
+                Some(10) => message(if close_after { "回答やモデル操作が実行中のため、ウィンドウを閉じませんでした。画面で処理を停止するか、完了後にもう一度閉じてください。" } else { "回答やモデル操作が完了してから、もう一度停止してください。" }, false),
                 _ => message("モデルを停止できませんでした。実行状態を確認してから、もう一度お試しください。", true),
             }
         });
@@ -243,7 +289,7 @@ fn menu(app: &AppHandle, managed: bool) -> Result<()> {
     if managed || app.state::<State>().stop_models.is_some() {
         submenu.append(&MenuItem::with_id(app, "stop-models", "モデルを停止", true, None::<&str>)?)?;
     }
-    submenu.append(&MenuItem::with_id(app, "quit", if managed { "Strataを終了" } else { "ウィンドウを閉じる" }, true, None::<&str>)?)?;
+    submenu.append(&MenuItem::with_id(app, "quit", if managed { "Strataを終了" } else if app.state::<State>().stop_models.is_some() { "モデルを停止して閉じる" } else { "ウィンドウを閉じる" }, true, None::<&str>)?)?;
     app.set_menu(Menu::with_items(app, &[&submenu])?)?;
     Ok(())
 }
@@ -268,9 +314,8 @@ fn menu_action(app: &AppHandle, action: &str) {
         "unshare" => helper(app, "unshare", &["--tailscale-off"]),
         "update" => helper(app, "update", &[]),
         "stop-models" if state.launcher.is_some() => helper(app, "stop-models", &["--stop-models"]),
-        "stop-models" => stop_local_models(app),
-        "quit" if state.launcher.is_some() => helper(app, "quit", &["--stop", "--wait"]),
-        "quit" => app.exit(0),
+        "stop-models" => stop_local_models(app, false),
+        "quit" => request_close(app),
         _ => {}
     }
 }
@@ -290,7 +335,7 @@ fn run(config: Options) -> Result<()> {
     let digest = format!("{:x}", Sha256::digest(key.as_bytes()));
     context.config_mut().identifier = format!("com.strata.managed-window.instance{}", &digest[..20]);
     let mode = config.mode;
-    let state = State { data:config.data, launcher, stop_models, url:Mutex::new(config.url.clone()), shared:Mutex::new(config.shared), busy:AtomicBool::new(false), mode, last_prompted:Mutex::new(None) };
+    let state = State { data:config.data, launcher, stop_models, url:Mutex::new(config.url.clone()), shared:Mutex::new(config.shared), busy:AtomicBool::new(false), close_requested:AtomicBool::new(false), mode, last_prompted:Mutex::new(None) };
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, args, _| {
             let Ok(request) = options(args.into_iter().skip(1)) else { return; };
@@ -317,6 +362,14 @@ fn run(config: Options) -> Result<()> {
             Ok(())
         })
         .on_menu_event(|app, event| menu_action(app, event.id().as_ref()))
+        .on_window_event(|window, event| {
+            if window.label() == "main" && window.state::<State>().mode == Mode::View {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    request_close(window.app_handle());
+                }
+            }
+        })
         .build(context)?;
     app.run(move |_, event| {
         if mode == Mode::View && matches!(event, tauri::RunEvent::Exit) {
@@ -360,5 +413,15 @@ mod tests {
         assert!(!valid_tag("v0.2.12"));
         assert!(!valid_tag("managed-v0.2.12-0"));
         assert!(!valid_tag("managed-v0.2.12-15\n"));
+    }
+    #[test]
+    fn user_close_stops_only_the_windows_owned_local_models() {
+        assert_eq!(close_action(Mode::View, true, false, true), CloseAction::Managed);
+        assert_eq!(close_action(Mode::View, false, true, true), CloseAction::Local);
+        assert_eq!(close_action(Mode::View, false, true, false), CloseAction::WindowOnly);
+        assert_eq!(close_action(Mode::View, false, false, true), CloseAction::WindowOnly);
+        for mode in [Mode::Smoke, Mode::Close, Mode::Refresh] {
+            assert_eq!(close_action(mode, true, true, true), CloseAction::Ignore);
+        }
     }
 }

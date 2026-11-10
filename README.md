@@ -2,6 +2,8 @@
 
 In the Windows app, choose **Strata → モデルを停止 (Stop models)** to unload local models and free their VRAM while the window stays open. Wait for any reply or model operation to finish before trying again. Select a model to load it again. [Japanese instructions](README.ja.md#モデルを停止してvramを空ける)
 
+Closing the host PC's desktop window with **×** or **Alt+F4** stops its local models and releases their RAM and VRAM before exiting. If generation, model operations or updates are still running, or stopping fails, the window stays open and explains why. Stop the current task or wait for it to finish, then close again. Keep the host window open while using its models through Tailscale or a CLI. Closing a browser or a remote-view-only window on another device does not stop the host PC.
+
 The Windows installer includes the coding agent. Choose **Strata → 自動テストでコーディング** to enable a dedicated coding chat that runs tests and uses failures to revise code and rerun tests. First use asks you to accept Bypass mode, which allows file changes and commands without approval prompts. Select your project folder and an added model that supports tool calls. Project-specific development tools and dependencies are required. [日本語の設定手順](managed-local/windows-installer/README.ja.md#自動テストでコーディング)
 
 ### Tailscaleで別のPC・スマートフォンから使う

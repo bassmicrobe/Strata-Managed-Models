@@ -109,15 +109,13 @@ export async function stopHost(paths,{token,record,modelsOnly=false}={}){
   if(!current.maintenance.enabled||!current.maintenance.active)throw fail('Strata could not guard the shutdown. Try again after updating the app.');
   if(isBusy(current.native,current.serving,current.maintenance,current.agent,current.managed))throw fail('回答やモデルの処理が終わってから、もう一度お試しください。');
   for(const instance of current.native.instances)if(modelsOnly||instance.status!=='error')await request(record,`/api/native/instances/${encodeURIComponent(instance.id)}/unload`,{method:'POST',token});
-  if(modelsOnly){
-    if(current.managed?.enabled&&current.managed.activeIds?.length){
-      const stop=json(join(paths.dataRoot,'managed-models.json')).stopCommand;
-      if(!stop)throw fail('保存済みモデルの停止設定が見つかりません。');
-      const {runManagedCommand}=await import(pathToFileURL(join(dirname(record.entry),'managed-local-models.mjs')));
-      await runManagedCommand(stop);
-    }
-    return;
+  if(current.managed?.enabled&&current.managed.activeIds?.length){
+    const stop=json(join(paths.dataRoot,'managed-models.json')).stopCommand;
+    if(!stop)throw fail('保存済みモデルの停止設定が見つかりません。');
+    const {runManagedCommand}=await import(pathToFileURL(join(dirname(record.entry),'managed-local-models.mjs')));
+    await runManagedCommand(stop);
   }
+  if(modelsOnly)return;
   if(!ownsProcess(paths,record,await processIdentity(record.pid)))throw fail('The Strata process changed while closing.');
   if(record.shutdownToken){
     const response=await fetch(`http://127.0.0.1:${record.port}/api/control/shutdown`,{method:'POST',headers:{'x-strata-client':'strata-managed-launcher','x-strata-shutdown':record.shutdownToken,...(token?{'x-strata-updater':token}:{})},signal:AbortSignal.timeout(5000)});
