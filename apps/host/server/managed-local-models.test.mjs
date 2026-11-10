@@ -38,10 +38,10 @@ async function fixture(t, options = {}) {
   const configPath = join(dir, 'models.json');
   writeFileSync(configPath, JSON.stringify(config));
   const active = new Set(options.active ?? []), commands = [], requests = [], states = [];
-  const gateway = createManagedLocalModels({ configPath, changed: state => states.push(state),
+  const load = () => createManagedLocalModels({ configPath, changed: state => states.push(state),
     runCommand: async command => {
       const mode = command.args[0]; commands.push(mode);
-      if (await options.onRun?.(mode, { active, commands }) === false) return;
+      if (await options.onRun?.(mode, { active, commands, args: command.args }) === false) return;
       active.clear(); if (mode !== 'stop') active.add(mode);
     },
     fetchImpl: async (input, init = {}) => {
@@ -65,6 +65,7 @@ async function fixture(t, options = {}) {
       return options.onChat ? options.onChat(body, init, record) : jsonResponse({ model: body.model, choices: [{ message: { role: 'assistant', content: 'ok' } }] });
     },
   });
+  const gateway = load();
   const server = createServer((req, res) => {
     gateway.proxy(req, res, req.url.slice(1)).catch(err => { res.writeHead(err.statusCode ?? 500); res.end('gateway error'); });
   });
@@ -83,7 +84,7 @@ async function fixture(t, options = {}) {
     assert.ok(target.startsWith(root) && target.includes('strata-managed-models-test-'));
     rmSync(target, { recursive: true, force: true });
   });
-  return { gateway, active, commands, requests, states, request, base, token, backendKeyFile, maintenanceFile: config.maintenanceFile };
+  return { gateway, load, dir, config, active, commands, requests, states, request, base, token, backendKeyFile, maintenanceFile: config.maintenanceFile };
 }
 
 test('disabled manager does not read credentials, probe, or execute commands', async () => {
@@ -304,4 +305,77 @@ test('maintenance lets an existing response finish and prevents an already queue
   assert.match((await refused.json()).error.message, /更新/);
   assert.deepEqual(h.commands, [], 'an update lease prevents queued work from loading a different model');
   assert.equal((await h.gateway.publicState({ refresh: false })).activeRequests, 0);
+});
+
+test('prepared model options survive a replacement host and reload from the same files', async t => {
+  const args = [];
+  let context = 32768, wrongContext = false;
+  const h = await fixture(t, {
+    active: ['saved'],
+    config: { models: [{
+      id: 'saved', modelId: 'saved-model', label: 'Saved GGUF', baseUrl: 'http://127.0.0.1:18081/v1',
+      command: { file: resolve(tmpdir(), 'fixture-adapter.ps1'), args: ['saved'] },
+      contextOptions: [32768, 65536, 131072], thinkingBudgetOptions: [-1, 4096, 6144],
+    }] },
+    onRun(mode, detail) {
+      if (mode !== 'saved') return;
+      args.push(detail.args);
+      if (!wrongContext) context = Number(detail.args[2]);
+    },
+    onProbe(url) {
+      if (url.pathname === '/props') return jsonResponse({ default_generation_settings: { n_ctx: context } });
+    },
+  });
+  const finish = async gateway => {
+    await until(async () => !(await gateway.publicState({ refresh: false })).switching);
+    return gateway.publicState({ refresh: false });
+  };
+  const changed = { contextMax: 131072, thinkingBudget: 4096 };
+  assert.throws(() => h.gateway.requestSwitch('saved', { ...changed, contextMax: 262144 }), { statusCode: 400 });
+  h.gateway.requestSwitch('saved', changed);
+  assert.equal((await finish(h.gateway)).activeId, 'saved');
+  const registration = readFileSync(join(h.dir, 'models.json'));
+  const saved = readFileSync(join(h.dir, 'managed-model-settings.json'));
+  assert.deepEqual(JSON.parse(saved).models[0], { id: 'saved', modelId: 'saved-model', ...changed });
+  const replacement = h.load();
+  assert.equal(replacement.providerRegistration('http://127.0.0.1:8792/api/managed-models/v1').models[0].contextMax, 131072);
+  h.active.clear();
+  replacement.requestSwitch('saved');
+  const loaded = await finish(replacement);
+  assert.equal(loaded.models[0].thinkingBudget, 4096);
+  assert.equal(loaded.activeId, 'saved');
+  assert.deepEqual(args, Array(2).fill(['saved', '-ContextTokens', '131072', '-ThinkingBudget', '4096']));
+  wrongContext = true;
+  replacement.requestSwitch('saved', { contextMax: 65536, thinkingBudget: 6144 });
+  assert.match((await finish(replacement)).error, /コンテキスト長/);
+  assert.deepEqual(readFileSync(join(h.dir, 'managed-model-settings.json')), saved, 'a failed reload leaves the last saved settings intact');
+  assert.deepEqual(readFileSync(join(h.dir, 'models.json')), registration, 'reloads never rewrite registration');
+});
+
+test('pre-existing local adapter options are read and applied without rewriting its registry', async t => {
+  const source = join(tmpdir(), 'managed-adapter-' + process.pid + '-' + Math.random() + '.json');
+  t.after(() => rmSync(source, { force: true }));
+  const id = 'saved', modelId = 'saved-model';
+  const before = { contextMax: 131072, thinkingBudget: 4096 };
+  writeFileSync(source, JSON.stringify({ models: [{ id, modelId, ...before }] }));
+  const after = { contextMax: 65536, thinkingBudget: 6144 };
+  const h = await fixture(t, {
+    active: [id],
+    config: { settingsSource: source, models: [{
+      id, modelId, label: 'Saved GGUF', baseUrl: 'http://127.0.0.1:18081/v1',
+      command: { file: resolve(tmpdir(), 'fixture-adapter.ps1'), args: [id] },
+      contextOptions: [32768, 65536, 131072], thinkingBudgetOptions: [-1, 4096, 6144],
+    }] },
+    onRun(mode, { args }) {
+      assert.equal(mode, id);
+      assert.deepEqual(args, [id, '-ContextTokens', '65536', '-ThinkingBudget', '6144']);
+      writeFileSync(source, JSON.stringify({ models: [{ id, modelId, ...after }] }));
+    },
+  });
+  assert.equal((await h.gateway.publicState()).models[0].contextMax, before.contextMax);
+  h.gateway.requestSwitch(id, after);
+  await until(async () => !(await h.gateway.publicState({ refresh: false })).switching);
+  const model = (await h.load().publicState()).models[0];
+  assert.deepEqual([model.contextMax, model.thinkingBudget], [65536, 6144]);
+  assert.deepEqual(h.commands, [id], 'the existing adapter owns the guarded restart');
 });

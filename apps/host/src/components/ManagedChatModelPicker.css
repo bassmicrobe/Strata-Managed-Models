@@ -3,3 +3,7 @@
 .managed-model-option .model-picker-state { align-self: center; }
 .managed-model-loading { display: grid; gap: 12px; }
 .managed-model-loading p { margin: 0; }
+.managed-model-settings { display: grid; gap: 12px; }
+.managed-model-settings label { display: grid; gap: 6px; }
+.managed-model-settings select { width: 100%; color: inherit; background: var(--surface, Canvas); padding: 8px; }
+.managed-model-settings p { margin: 0; }

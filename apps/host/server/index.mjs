@@ -192,14 +192,28 @@ function withPictureAnswers(list) {
   return { ...list, connections };
 }
 // This machine's opt-in lifecycle gateway keeps the existing provider ID so saved chats still resolve.
-const managedModels = createManagedLocalModels({ changed: value => hub.send('managed-models', value), log: line => console.log(line) });
+const managedModels = createManagedLocalModels({
+  settingsPath: join(store.DATA_DIR, 'managed-model-settings.json'),
+  changed: value => {
+    hub.send('managed-models', value);
+    if (!value.connectionId || value.switching) return;
+    const connection = modelProviders.list().connections.find(row => row.id === value.connectionId);
+    if (connection && value.models.some(model => model.contextOptions &&
+        connection.models.find(row => row.id === model.modelId)?.contextMax !== model.contextMax)) {
+      modelProviders.save({ id: connection.id, ...managedModels.providerRegistration(connection.baseUrl) });
+    }
+  },
+  log: line => console.log(line),
+});
 const updateMaintenance = createUpdateMaintenance();
 if (managedModels.enabled) {
   const baseUrl = `http://127.0.0.1:${PORT}/api/managed-models/v1`;
   const registration = managedModels.providerRegistration(baseUrl);
   const config = JSON.parse(readFileSync(process.env.STRATA_MANAGED_MODELS_CONFIG, 'utf8').replace(/^\uFEFF/, ''));
   const existing = modelProviders.list().connections.find(c => c.id === config.connectionId)
-    ?? modelProviders.list().connections.find(c => c.baseUrl === baseUrl);
+    ?? modelProviders.list().connections.find(c => c.baseUrl === baseUrl)
+    ?? modelProviders.list().connections.find(c => /^http:\/\/127\.0\.0\.1:\d+\/api\/managed-models\/v1$/.test(c.baseUrl)
+      && c.kind === 'custom' && c.protocol === 'openai-chat');
   const saved = modelProviders.save({ ...registration, ...(existing ? { id: existing.id } : {}) });
   managedModels.setConnectionId(saved.connections.find(c => c.baseUrl === baseUrl).id);
 }
@@ -313,7 +327,7 @@ function setupState() {
   const s = store.get();
   return {
     complete: !!s.setup.complete,
-    dismissed: !!s.setup.dismissed,
+    dismissed: !!s.setup.dismissed || managedModels.enabled,
     choices: s.setup.choices ?? {},
     step: s.setup.step ?? 1,
     flowVersion: 2,
@@ -1033,7 +1047,7 @@ async function api(req, res, path, method, url) {
       } catch { allowed = false; }
     }
     if (!allowed) return error(res, 403, 'Not allowed.');
-    try { const body = await readBody(req, 4096); return json(res, 202, managedModels.requestSwitch(body?.id)); }
+    try { const body = await readBody(req, 4096); return json(res, 202, managedModels.requestSwitch(body?.id, body?.settings)); }
     catch (err) { return error(res, err.statusCode ?? 400, err.message); }
   }
   if(path==='/api/fonts'&&method==='GET')return json(res,200,await systemFonts());

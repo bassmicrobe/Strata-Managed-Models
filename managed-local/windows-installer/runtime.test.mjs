@@ -57,6 +57,8 @@ test('fresh package routes every model, profile and component setting to its own
   try{const env=hostEnvironment(f.paths,f.active,8792);for(const key of ['STRATA_HOME','STRATA_DATA_DIR','STRATA_STATE_DIR','STRATA_COMPONENTS_DIR','STRATA_INSTALL_DIR','STRATA_PROFILE_DIR','STRATA_RUNTIME_DIR','STRATA_SETTINGS_FILE','STRATA_MODELS_DIR','STRATA_WORKSPACE'])assert(env[key].startsWith(f.dataRoot),key);assert.equal(env.STRATA_MANAGED_MODELS_CONFIG,undefined);assert.equal(env.STRATA_NO_ACQUIRE,'1');assert.equal(env.STRATA_CONTROL_DIR,f.paths.control);assert.equal(env.STRATA_UPDATE_MAINTENANCE_FILE,f.paths.maintenanceFile);
     assert.equal(env.STRATA_HARNESS_DIR,join(f.appRoot,'resources/harness'));assert.equal(env.PATH.split(delimiter)[0],dirname(f.paths.node));assert.equal(Object.keys(env).filter(k=>k.toLowerCase()==='path').length,1);assert.equal(env.STRATA_SHUTDOWN_TOKEN,undefined);
     writeFileSync(join(f.dataRoot,'managed-models.json'),'{}');assert.equal(hostEnvironment(f.paths,f.active,8792).STRATA_MANAGED_MODELS_CONFIG,join(f.dataRoot,'managed-models.json'));
+    assert.equal(hostEnvironment(f.paths,f.active,8792,{smoke:true}).STRATA_MANAGED_MODELS_CONFIG,undefined);
+    assert.equal(hostEnvironment(f.paths,f.active,8792,{smoke:true,managedModels:true}).STRATA_MANAGED_MODELS_CONFIG,join(f.dataRoot,'managed-models.json'));
   }finally{if(old===undefined)delete process.env.STRATA_MANAGED_MODELS_CONFIG;else process.env.STRATA_MANAGED_MODELS_CONFIG=old;}
 });
 test('releases advance by numeric upstream version or fork build and never downgrade an installed setup',()=>{

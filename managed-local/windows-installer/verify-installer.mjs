@@ -206,6 +206,28 @@ export async function verifyWindowsInstaller({installer,workRoot,run=runInstalle
     assert.deepEqual(desktop,{ok:true,windowCreated:true,pageLoaded:true,renderer:'WebView2',loopback:true});
     return fixture;
   });
+  const registrationFile=join(data,'managed-models.json'), settingsFile=join(data,'profile/data/managed-model-settings.json');
+  const retainedModel=join(data,'models','test-reference.gguf');
+  mkdirSync(dirname(retainedModel),{recursive:true});
+  writeFileSync(retainedModel,'Test fixture for an already saved file. This is never opened by an inference engine.');
+  const managedModel={id:'saved-fixture',label:'Saved file fixture',modelId:'saved-fixture-model',baseUrl:'http://127.0.0.1:9/v1',
+    command:{file:join(data,'unused-test-adapter.ps1'),args:['-ModelPath',retainedModel]},
+    contextMax:32768,contextOptions:[32768,65536,131072],thinkingBudgetOptions:[-1,4096]};
+  writeFileSync(registrationFile,JSON.stringify({tokenFile:join(data,'saved-model-fixture.key'),models:[managedModel]}));
+  writeFileSync(settingsFile,JSON.stringify({version:1,models:[{id:managedModel.id,modelId:managedModel.modelId,contextMax:131072,thinkingBudget:4096}]}));
+  const inspectSavedModel=async(port,expectedId)=>{
+    const state=await installedApi(port,'/api/managed-models');
+    assert.equal(state.enabled,true);assert.equal(state.activeId,null);assert.equal(state.models.length,1);
+    assert.deepEqual([state.models[0].id,state.models[0].contextMax,state.models[0].thinkingBudget],[managedModel.id,131072,4096]);
+    const connection=(await installedApi(port,'/api/model-providers')).connections.find(row=>row.id===state.connectionId);
+    assert.equal(connection.models[0].contextMax,131072);
+    if(expectedId)assert.equal(connection.id,expectedId);
+    assert.equal((await installedApi(port,'/api/setup')).dismissed,true);
+    return connection.id;
+  };
+  const managedId=await normalProfile(port=>inspectSavedModel(port));
+  const savedFiles=[registrationFile,settingsFile,retainedModel],savedBytes=savedFiles.map(file=>readFileSync(file));
+  const assertSavedModelsRetained=()=>savedFiles.forEach((file,i)=>assert.deepEqual(readFileSync(file),savedBytes[i],'A saved model registration, setting or file changed.'));
   const providerFile=join(data,'profile/data/model-providers.json'),chatFile=join(data,'profile/data/chats',fixture.session.id+'.json');
   const providerBytes=readFileSync(providerFile),chatBytes=readFileSync(chatFile);
   const codingFiles=[join(data,'coding.json'),instructionsFile,join(data,'profile/data/chats',coding.state.chatId+'.json'),join(coding.chat.workspace,'installer-portability.test.cjs'),join(coding.chat.workspace,'installer-node-result.json')];
@@ -215,8 +237,8 @@ export async function verifyWindowsInstaller({installer,workRoot,run=runInstalle
   writeFileSync(userMarker,'User settings and downloaded models are stored here.');writeFileSync(appMarker,'An unrecognized user file must not be recursively removed.');
   await invokeSetup('Repairing the installed application');const second=await smoke('Rechecking the clean smoke profile after repair');assert(existsSync(userMarker));assert(existsSync(appMarker));
   phase('Verifying selected models and chat after repair and normal restart');
-  await normalProfile(async port=>{await configureCoding(false);await inspectInstalledCoding(port,{data,expected:coding});return exerciseInstalledProfile(port,{expected:fixture});});
-  assertCodingRetained();
+  await normalProfile(async port=>{await configureCoding(false);await inspectInstalledCoding(port,{data,expected:coding});await inspectSavedModel(port,managedId);return exerciseInstalledProfile(port,{expected:fixture});});
+  assertCodingRetained();assertSavedModelsRetained();
   assert.deepEqual(readFileSync(providerFile),providerBytes,'Repair changed the saved API models.');assert.deepEqual(readFileSync(chatFile),chatBytes,'Repair changed the saved chat.');
   phase('Uninstalling only the application');
   try{await run(join(app,'Uninstall.exe'),['/S'],{cwd:workRoot,env,timeoutMs:120000});}catch(error){diagnostics();throw error;}
@@ -227,6 +249,6 @@ export async function verifyWindowsInstaller({installer,workRoot,run=runInstalle
   assert(!existsSync(join(app,'resources/harness/lib/bin.js')),'The bundled coding assistant was not removed.');
   assert(existsSync(userMarker),'Uninstall removed user data.');assert(existsSync(appMarker),'Uninstall removed an unrecognized file.');
   assert.deepEqual(readFileSync(providerFile),providerBytes,'Uninstall changed or removed the saved API models.');assert.deepEqual(readFileSync(chatFile),chatBytes,'Uninstall changed or removed the saved chat.');
-  assertCodingRetained();
-  const result={ok:true,installed:true,repaired:true,uninstalled:true,userDataRetained:true,unknownAppFileRetained:true,apiModelsPersisted:2,chatRetained:true,providerFileRetained:true,chatFileRetained:true,codingOptInVerified:true,codingHistoryRetained:true,userInstructionsRetained:true,codingWorkspaceRetained:true,harness,desktop,first,second};writeFileSync(join(workRoot,'installer-verification.json'),JSON.stringify(result,null,2));console.log('Windows install, desktop, portable coding tools, opt-in, selected models, chats, instructions, project files, repair and uninstall/user-data retention: passed.');return result;
+  assertCodingRetained();assertSavedModelsRetained();
+  const result={ok:true,installed:true,repaired:true,uninstalled:true,userDataRetained:true,unknownAppFileRetained:true,apiModelsPersisted:2,savedModelSettingsRetained:true,chatRetained:true,providerFileRetained:true,chatFileRetained:true,codingOptInVerified:true,codingHistoryRetained:true,userInstructionsRetained:true,codingWorkspaceRetained:true,harness,desktop,first,second};writeFileSync(join(workRoot,'installer-verification.json'),JSON.stringify(result,null,2));console.log('Windows install, desktop, portable coding tools, opt-in, selected models, chats, instructions, project files, repair and uninstall/user-data retention: passed.');return result;
 }

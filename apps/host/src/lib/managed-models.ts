@@ -7,7 +7,15 @@ export interface ManagedModel {
     modelId: string;
     description?: string;
     contextMax?: number;
+    contextOptions?: number[];
+    thinkingBudget?: number;
+    thinkingBudgetOptions?: number[];
     vision?: boolean;
+}
+
+export interface ManagedModelSettings {
+    contextMax: number;
+    thinkingBudget: number;
 }
 
 export interface ManagedModelsState {
@@ -42,11 +50,11 @@ function put(next: ManagedModelsState) {
     listeners.forEach(listener => listener());
 }
 
-async function request(method: 'GET' | 'POST', id?: string): Promise<ManagedModelsState> {
+async function request(method: 'GET' | 'POST', id?: string, settings?: ManagedModelSettings): Promise<ManagedModelsState> {
     const response = await fetch(`${BASE}/api/managed-models${method === 'POST' ? '/switch' : ''}`, {
         method,
         headers: method === 'POST' ? { 'content-type': 'application/json', 'x-strata-client': 'managed-model-picker' } : undefined,
-        body: method === 'POST' ? JSON.stringify({ id }) : undefined,
+        body: method === 'POST' ? JSON.stringify({ id, settings }) : undefined,
         signal: AbortSignal.timeout(20_000),
     });
     if (method === 'GET' && response.status === 404) return disabled;
@@ -111,9 +119,9 @@ export function managedModelPhase(phase: string): string {
 }
 
 /** The POST starts the real host operation; readiness comes only from the host's health check. */
-export async function switchManagedModel(id: string): Promise<ManagedModelsState> {
+export async function switchManagedModel(id: string, settings?: ManagedModelSettings): Promise<ManagedModelsState> {
     generation++;
-    const accepted = await request('POST', id);
+    const accepted = await request('POST', id, settings);
     put(accepted);
     return new Promise<ManagedModelsState>((resolve, reject) => {
         let unsubscribe = () => {};

@@ -1,14 +1,26 @@
 /** Opt-in local model lifecycle and OpenAI chat gateway. No model is loaded at startup. */
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, extname, isAbsolute } from 'node:path';
-import { randomBytes } from 'node:crypto';
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { dirname, extname, isAbsolute, join } from 'node:path';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { makePrivate } from './private-file.mjs';
 import { json, readBody, sameSecret } from './util.mjs';
 
 const failure = (message, statusCode = 400) => Object.assign(new Error(message), { statusCode });
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+const readJson = path => JSON.parse(readFileSync(path, 'utf8').replace(/^\uFEFF/, ''));
+const contextDefault = m => m.contextMax ?? 32768;
+const budgetDefault = m => m.thinkingBudget ?? -1;
+const settingsFor = (m, value) => m.contextOptions?.includes(value?.contextMax)
+  && m.thinkingBudgetOptions?.includes(value?.thinkingBudget);
+function optionList(values, min, max) {
+  if (!Array.isArray(values) || !values.length || values.length > 24 ||
+      values.some(value => !Number.isSafeInteger(value) || value < min || value > max)) {
+    throw failure('Invalid saved model settings options.');
+  }
+  return [...new Set(values)].sort((a, b) => a - b);
+}
 const text = value => typeof value === 'string' ? value.trim() : '';
 function command(value) {
   if (!value || !isAbsolute(value.file ?? '') || extname(value.file).toLowerCase() !== '.ps1'
@@ -19,15 +31,23 @@ function command(value) {
 }
 function configuration(configPath) {
   if (!configPath) return null;
-  const cfg = JSON.parse(readFileSync(configPath, 'utf8').replace(/^\uFEFF/, ''));
+  const cfg = readJson(configPath);
   if (!isAbsolute(cfg.tokenFile ?? '') || !Array.isArray(cfg.models) || !cfg.models.length || cfg.models.length > 16) throw failure('Invalid managed model configuration.');
   if (cfg.maintenanceFile != null && !isAbsolute(cfg.maintenanceFile)) throw failure('Invalid managed maintenance lease path.');
+  if (cfg.settingsSource != null && !isAbsolute(cfg.settingsSource)) throw failure('Invalid saved model settings source.');
   const models = cfg.models.map(m => {
     const url = new URL(m.baseUrl);
     if (url.protocol !== 'http:' || !['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname)
       || url.username || url.password || url.search || url.hash) throw failure('Managed model APIs must be local HTTP addresses.');
     if (!/^[a-z0-9_-]{1,64}$/.test(m.id ?? '') || !text(m.modelId) || !text(m.label)) throw failure('Invalid managed model identity.');
     if (m.apiKeyFile && !isAbsolute(m.apiKeyFile)) throw failure('Invalid managed API key file.');
+    if (m.contextOptions !== undefined || m.thinkingBudgetOptions !== undefined) {
+      m.contextOptions = optionList(m.contextOptions, 1024, 1048576);
+      m.thinkingBudgetOptions = optionList(m.thinkingBudgetOptions, -1, 1048576);
+      if (!m.contextOptions.includes(contextDefault(m)) || !m.thinkingBudgetOptions.includes(budgetDefault(m))) {
+        throw failure('Saved model settings options must include the defaults.');
+      }
+    }
     return { ...m, id: m.id, label: text(m.label), modelId: text(m.modelId), baseUrl: url.href.replace(/\/+$/, ''), command: command(m.command) };
   });
   if (new Set(models.map(m => m.id)).size !== models.length || new Set(models.map(m => m.modelId)).size !== models.length) throw failure('Managed model IDs must be unique.');
@@ -42,8 +62,9 @@ function tokenAt(path) {
   return token;
 }
 export function runManagedCommand(cmd, { timeoutMs = 650000 } = {}) {
+  const spec = command(cmd);
   return new Promise((resolve, reject) => {
-    const child = spawn('powershell.exe', ['-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', cmd.file, ...cmd.args], {
+    const child = spawn('powershell.exe', ['-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', spec.file, ...spec.args], {
       windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], shell: false,
     });
     // The scripts keep their own useful logs. Do not echo runtime credentials into HTTP errors.
@@ -57,16 +78,51 @@ export function runManagedCommand(cmd, { timeoutMs = 650000 } = {}) {
     child.once('exit', code => {
       clearTimeout(timer);
       if (expired) reject(failure('モデルの切り替えが時間内に完了しませんでした。', 503));
+      else if (code === 10) reject(failure('別の Strata ウィンドウや CLI で処理中です。完了後にもう一度お試しください。', 409));
       else code === 0 ? resolve() : reject(failure('モデルの切り替えに失敗しました。起動ログを確認してください。', 503));
     });
   });
 }
 
-export function createManagedLocalModels({ configPath = process.env.STRATA_MANAGED_MODELS_CONFIG, fetchImpl = fetch,
+export function createManagedLocalModels({ configPath = process.env.STRATA_MANAGED_MODELS_CONFIG, settingsPath, fetchImpl = fetch,
   runCommand = runManagedCommand, changed = () => {}, log = () => {} } = {}) {
   const cfg = configuration(configPath), enabled = !!cfg;
   const token = cfg ? tokenAt(cfg.tokenFile) : '';
   const models = cfg?.models ?? [];
+  const settingsFile = cfg && (settingsPath ?? join(dirname(configPath), 'managed-model-settings.json'));
+  const saved = new Map();
+  if (settingsFile && !cfg.settingsSource && models.some(m => m.contextOptions) && existsSync(settingsFile)) {
+    const settings = readJson(settingsFile);
+    if (settings.version !== 1 || !Array.isArray(settings.models)) throw failure('Invalid saved model settings file.');
+    for (const model of models) {
+      const row = settings.models.find(value => value.id === model.id && value.modelId === model.modelId);
+      if (settingsFor(model, row)) saved.set(model.id, row);
+    }
+  }
+  const needsReload = new Set();
+  function effective(m) {
+    if (!m.contextOptions) return m;
+    if (cfg.settingsSource) {
+      const row = readJson(cfg.settingsSource).models.find(value => value.id === m.id && value.modelId === m.modelId);
+      if (!row) return m;
+      const contextMax = contextDefault(row), thinkingBudget = budgetDefault(row);
+      if (!settingsFor(m, { contextMax, thinkingBudget })) return m;
+      return { ...m, contextMax, thinkingBudget, description: row.description ?? m.description };
+    }
+    const row = saved.get(m.id);
+    return row ? { ...m, contextMax: row.contextMax, thinkingBudget: row.thinkingBudget } : m;
+  }
+  function persist(m, settings) {
+    const next = new Map(saved).set(m.id, { id: m.id, modelId: m.modelId, ...settings });
+    const temp = settingsFile + '.' + randomUUID() + '.tmp';
+    mkdirSync(dirname(settingsFile), { recursive: true });
+    try {
+      writeFileSync(temp, JSON.stringify({ version: 1, models: [...next.values()] }, null, 2), { mode: 0o600, flag: 'wx' });
+      makePrivate(temp);
+      renameSync(temp, settingsFile);
+      saved.set(m.id, next.get(m.id));
+    } finally { try { unlinkSync(temp); } catch { /* the rename already moved it */ } }
+  }
   const lookup = new Map(models.map(m => [m.id, m]));
   const modelLookup = new Map(models.map(m => [m.modelId, m]));
   let connectionId = cfg?.connectionId ?? null, activeId = null, activeIds = [];
@@ -75,17 +131,23 @@ export function createManagedLocalModels({ configPath = process.env.STRATA_MANAG
   const queueLimit = Math.max(1, Math.min(8, cfg?.maxQueuedRequests ?? 4));
   const probeTimeout = cfg?.probeTimeoutMs ?? 1500;
   const verifyTimeout = cfg?.verifyTimeoutMs ?? 15000;
-  const publicModel = m => ({ id: m.id, label: m.label, modelId: m.modelId, description: m.description ?? '',
-    contextMax: m.contextMax ?? 32768, maxOutput: m.maxOutput ?? 8192, vision: m.vision !== false, reasoning: m.reasoning !== false });
+  function publicModel(model) {
+    const m = effective(model);
+    return { id: m.id, label: m.label, modelId: m.modelId, description: m.description ?? '',
+      contextMax: contextDefault(m), maxOutput: m.maxOutput ?? 8192, vision: m.vision !== false, reasoning: m.reasoning !== false,
+      ...(m.contextOptions ? { contextOptions: m.contextOptions, thinkingBudget: budgetDefault(m),
+        thinkingBudgetOptions: m.thinkingBudgetOptions } : {}) };
+  }
   function maintenance() {
-    if (!cfg?.maintenanceFile) return false;
-    try {
-      const lease = JSON.parse(readFileSync(cfg.maintenanceFile, 'utf8').replace(/^\uFEFF/, ''));
-      const expiry = typeof lease.expiresAt === 'number' ? lease.expiresAt : Date.parse(lease.expiresAt);
-      if (!Number.isSafeInteger(lease.pid) || lease.pid <= 0 || !Number.isFinite(expiry) || expiry <= Date.now()) return false;
-      process.kill(lease.pid, 0);
-      return true;
-    } catch { return false; }
+    return [cfg?.maintenanceFile, process.env.STRATA_UPDATE_MAINTENANCE_FILE].filter(Boolean).some(file => {
+      try {
+        const lease = readJson(file);
+        const expiry = typeof lease.expiresAt === 'number' ? lease.expiresAt : Date.parse(lease.expiresAt);
+        if (!Number.isSafeInteger(lease.pid) || lease.pid <= 0 || !Number.isFinite(expiry) || expiry <= Date.now()) return false;
+        process.kill(lease.pid, 0);
+        return true;
+      } catch { return false; }
+    });
   }
   function requireAvailable() {
     if (maintenance()) throw failure('Strataを更新しています。完了後にもう一度お試しください。', 503);
@@ -138,19 +200,37 @@ export function createManagedLocalModels({ configPath = process.env.STRATA_MANAG
     tail = result.catch(() => {});
     return result.finally(() => { scheduled--; publish(); });
   }
-  async function ensure(m) {
+  async function ensure(m, settings) {
     try {
+      const previous = effective(m);
+      const reconfigure = settings && (settings.contextMax !== contextDefault(previous) || settings.thinkingBudget !== budgetDefault(previous));
       const ids = await detect();
-      if (ids.length === 1 && ids[0] === m.id) { phase = 'ready'; lastError = null; return; }
+      if (!reconfigure && !needsReload.has(m.id) && ids.length === 1 && ids[0] === m.id) { phase = 'ready'; lastError = null; return; }
       switching = true; targetId = m.id; phase = cfg.stopCommand ? 'stopping' : 'loading'; lastError = null; publish();
-      if (cfg.stopCommand) await runCommand(cfg.stopCommand);
+      const delegated = reconfigure && cfg.settingsSource;
+      if (cfg.stopCommand && !delegated) await runCommand(cfg.stopCommand);
       activeId = null; activeIds = []; phase = 'loading'; publish();
-      await runCommand(m.command);
+      const options = delegated || (!cfg.settingsSource && (reconfigure || saved.has(m.id) || needsReload.has(m.id)))
+        ? settings ?? { contextMax: contextDefault(previous), thinkingBudget: budgetDefault(previous) } : null;
+      if (options && !delegated) needsReload.add(m.id);
+      await runCommand(options ? { ...m.command, args: [...m.command.args,
+        '-ContextTokens', String(options.contextMax), '-ThinkingBudget', String(options.thinkingBudget)] } : m.command);
       phase = 'checking'; publish();
       const deadline = Date.now() + verifyTimeout;
       do {
         const ready = await detect();
-        if (ready.length === 1 && ready[0] === m.id) { phase = 'ready'; return; }
+        if (ready.length === 1 && ready[0] === m.id) {
+          if (delegated && !matchesSettings(effective(m), settings)) throw failure('選んだ設定を確認できませんでした。', 503);
+          if (options && !delegated) {
+            const props = await fetchImpl(new URL('/props', m.baseUrl), { headers: backendHeaders(m), redirect: 'error', signal: AbortSignal.timeout(probeTimeout) });
+            if (!props.ok || (await props.json()).default_generation_settings?.n_ctx !== options.contextMax) {
+              throw failure('エンジンが選んだコンテキスト長で起動しませんでした。', 503);
+            }
+            if (reconfigure) persist(m, settings);
+            needsReload.delete(m.id);
+          }
+          phase = 'ready'; return;
+        }
         await sleep(Math.min(500, cfg.pollIntervalMs ?? 500));
       } while (Date.now() < deadline);
       throw failure('選択したモデルの起動を確認できませんでした。', 503);
@@ -160,27 +240,30 @@ export function createManagedLocalModels({ configPath = process.env.STRATA_MANAG
       throw failure(lastError, err.statusCode ?? 503);
     } finally { switching = false; targetId = null; publish(); }
   }
-  function requestSwitch(id) {
+  const matchesSettings = (m, value) => contextDefault(m) === value.contextMax && budgetDefault(m) === value.thinkingBudget;
+  function requestSwitch(id, settings) {
     requireEnabled();
     requireAvailable();
     const m = lookup.get(id);
     if (!m) throw failure('Unknown local model.');
-    if (switching && targetId === id) return snapshot();
+    if (settings !== undefined && !settingsFor(m, settings)) throw failure('このモデルで選べる設定を指定してください。');
+    if (settings === undefined && switching && targetId === id) return snapshot();
     if (scheduled || activeRequests || switching) throw failure('回答やモデルの読み込みが完了してから切り替えてください。', 409);
     switching = true; targetId = id; phase = 'checking'; lastError = null;
-    void enqueue(() => ensure(m)).catch(() => {});
+    const options = settings && { contextMax: settings.contextMax, thinkingBudget: settings.thinkingBudget };
+    void enqueue(() => ensure(m, options)).catch(() => {});
     return snapshot();
   }
   function providerRegistration(baseUrl) {
     requireEnabled();
     return { kind: 'custom', name: cfg.name ?? 'このPCのモデル', baseUrl, protocol: 'openai-chat', apiKey: token,
-      models: models.map(m => ({ id: m.modelId, name: m.label, contextMax: m.contextMax ?? 32768,
-        maxOutput: m.maxOutput ?? 8192, vision: m.vision !== false, reasoning: m.reasoning !== false })) };
+      models: models.map(publicModel).map(m => ({ id: m.modelId, name: m.label, contextMax: m.contextMax,
+        maxOutput: m.maxOutput, vision: m.vision, reasoning: m.reasoning })) };
   }
   async function proxy(req, res, subpath) {
     requireEnabled();
     if (!sameSecret(req.headers.authorization, `Bearer ${token}`)) return json(res, 401, { error: { message: 'Unauthorized local model gateway.', type: 'authentication_error' } });
-    if (subpath === 'models' && req.method === 'GET') return json(res, 200, { object: 'list', data: models.map(m => ({
+    if (subpath === 'models' && req.method === 'GET') return json(res, 200, { object: 'list', data: models.map(publicModel).map(m => ({
       id: m.modelId, name: m.label, object: 'model', owned_by: 'strata-local', context_length: m.contextMax ?? 32768,
       vision: m.vision !== false, reasoning: m.reasoning !== false,
       architecture: { input_modalities: m.vision === false ? ['text'] : ['text', 'image'], output_modalities: ['text'] },

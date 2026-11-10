@@ -26,6 +26,7 @@ import { tunedFields } from '../lib/tune-values';
 import { shownVision, steadyNoReader } from '../lib/pictures-choice';
 import { draftingChoices as draftingOptions, resolveDrafter } from '../lib/drafting';
 import { deepseekContexts, deepseekContextNote } from '../lib/deepseek-context';
+import { NativeThinkingBudget } from './NativeThinkingBudget';
 import { NativeSettings } from './NativeSettings';
 import { NativeSettingsFile } from './NativeSettingsFile';
 import { RunImageModel } from './RunImageModel';
@@ -255,6 +256,8 @@ export function NativeModels({ onOtherModels, onReady, onImport, onConnectEngine
       {tr(selectedSize?.multi_file && deepseekContextNote(context) ? <p className="small muted native-spill-note"><Icon name="info" size={16}/>{tr(deepseekContextNote(context))}</p> : null)}
       <div className="native-choice__row">
        <div className="native-choice__col"><span className="native-choice__label">{tr("Conversation context")}</span><Select ariaLabel={tr("Conversation context")} value={String(context)} options={contextChoices(contextList, context).map(n => ({ value: String(n), label: n % 1024 === 0 ? `${n / 1024}K` : `${n.toLocaleString()} tokens` }))} onChange={n => { setContextPicked(true); setContext(Number(n)); }}/></div>
+       {!expert && installed?.ready && native?.fields.some(field => field.id === 'reasoning_budget_tokens' && field.supported !== false)
+           ? <NativeThinkingBudget key={installed.model} model={installed.model} disabled={pending || !!active}/> : null}
        {tr(draftingChoices ? <div className="native-choice__col"><span className="native-choice__label">{tr("Drafting")}</span><Select ariaLabel={tr("Drafting")} value={drafting} disabled={!!active} options={draftingChoices.map(v => ({ value: v, label: tr(draftingWords[v]) }))} onChange={v => setDrafting(String(v))}/></div> : null)}
        <div className="native-choice__col"><span className="native-choice__label">{tr("Computer use")}</span><div className="native-resource-choice"><button aria-pressed={resourceProfile === 'work'} data-selected={resourceProfile === 'work'} onClick={() => setResourceProfile('work')}><Icon name="computer" size={20}/><span><strong>{tr("Leave room for my work")}</strong><small>{tr("Keeps 5-8 GB of memory free for other programs.")}</small></span>{tr(resourceProfile === 'work' ? <Icon name="check" size={15}/> : null)}</button><button aria-pressed={resourceProfile === 'performance'} data-selected={resourceProfile === 'performance'} onClick={() => setResourceProfile('performance')}><Icon name="bolt" size={20}/><span><strong>{tr("Full performance")}</strong><small>{tr("Give Strata priority")}</small></span>{tr(resourceProfile === 'performance' ? <Icon name="check" size={15}/> : null)}</button></div></div>
       </div>

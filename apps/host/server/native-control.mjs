@@ -184,6 +184,9 @@ export function createNativeControl({directory,requests=()=>[],changed=()=>{},sp
   if(busy(requests().filter(r=>instances.has(r.instanceId))))throw new Error('Finish or cancel requests before preparing model files.');
   for(const id of [...instances.keys()])await unload(id);
   if(job.state!=='running')return;
+  const modelId=(args.family??'qwen')==='qwen'?String(args.model).toLowerCase():`${args.family}-${String(args.model).toLowerCase()}`;
+  const prepared=snapshot.installed?.models?.find(model=>model.model===modelId);
+  const previousBudget=prepared ? record(modelId).config.reasoning_budget_tokens : undefined;
   let result=await tool('strata_install',installArgs(args,true));
   /* The engine comes with the model: the same job makes sure this PC has a usable engine (none installed, or a newer compatible
      one in the signed feed) through Control's component updater, and shows it in the job's own progress (install.engine, install.parts,
@@ -205,6 +208,10 @@ export function createNativeControl({directory,requests=()=>[],changed=()=>{},sp
      await refresh(true);
      const note=engineStep?.summaryNote();
      const finalResult=engineStep?job.result:result;
+     if(previousBudget!==undefined){
+      const current=record(modelId);
+      if(current.config.reasoning_budget_tokens!==previousBudget)rememberSetting(current.path,'reasoning_budget_tokens',previousBudget);
+     }
      if(note)return {...finalResult,summary:note};
      /* A context the person picked is kept with a marker (ui_context_chosen), so only an old saved 32K, which has no marker, is read as the old default. */
      if(args.contextChosen===true){try{const id=(result.install.family??args.family??'qwen')==='qwen'?String(args.model).toLowerCase():`${args.family}-${String(args.model).toLowerCase()}`;rememberSetting(record(id).path,'ui_context_chosen',true);}catch{/* the install itself is done */}}

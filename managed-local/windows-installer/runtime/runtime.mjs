@@ -33,7 +33,7 @@ export function validateActive(paths,active){
   const real=realpathSync(hostRoot);if(real!==realpathSync(bundled)&&!contained(realpathSync(paths.dataRoot),real))throw fail('The application folder points outside this installation.');
   return {...active,hostRoot};
 }
-export function hostEnvironment(paths,active,port,{profile=paths.profile,smoke=false}={}){
+export function hostEnvironment(paths,active,port,{profile=paths.profile,smoke=false,managedModels=!smoke}={}){
   const env={...process.env};
   // Windows environment names are case-insensitive; do not pass both PATH and Path to spawn.
   const pathKey=Object.keys(env).find(key=>key.toLowerCase()==='path'),systemPath=pathKey?env[pathKey]:'';
@@ -42,12 +42,12 @@ export function hostEnvironment(paths,active,port,{profile=paths.profile,smoke=f
   for(const key of ['PYTHONPATH','PYTHONHOME','PYTHONSTARTUP','STRATA_DATA_DIR','STRATA_MANAGED_MODELS_CONFIG','STRATA_HANDOVER','STRATA_NO_HANDOVER','STRATA_UPDATE_TRUSTED_KEYS','STRATA_DIST','STRATA_TAILSCALE_ORIGIN','STRATA_SHUTDOWN_TOKEN','GITHUB_TOKEN','GH_TOKEN'])delete env[key];
   Object.assign(env,{STRATA_HOME:profile,STRATA_DATA_DIR:paths.dataRoot,STRATA_STATE_DIR:join(paths.dataRoot,'state'),STRATA_COMPONENTS_DIR:join(paths.dataRoot,'components'),STRATA_CONTROL_DIR:paths.control,STRATA_INSTALL_DIR:join(paths.dataRoot,'install'),STRATA_PROFILE_DIR:join(paths.dataRoot,'profiles'),STRATA_RUNTIME_DIR:join(paths.dataRoot,'runtime'),STRATA_SETTINGS_FILE:join(paths.dataRoot,'app-settings.json'),STRATA_MODELS_DIR:join(paths.dataRoot,'models'),STRATA_WORKSPACE:join(paths.dataRoot,'Workspace'),STRATA_REAL_ENGINE:'1',STRATA_NO_ACQUIRE:'1',STRATA_APP_VERSION:active.version,STRATA_PORT:String(port),STRATA_BIND:'127.0.0.1',STRATA_UPDATE_MAINTENANCE_FILE:paths.maintenanceFile,STRATA_NO_BUNDLED_ENGINE:'1',STRATA_NO_REPAIR_ACCESS:'1'});
   env.STRATA_HARNESS_DIR=join(paths.appRoot,'resources/harness');
-  const managed=join(paths.dataRoot,'managed-models.json');if(existsSync(managed))env.STRATA_MANAGED_MODELS_CONFIG=managed;
+  const managed=join(paths.dataRoot,'managed-models.json');if(managedModels&&existsSync(managed))env.STRATA_MANAGED_MODELS_CONFIG=managed;
   if(!smoke){const origin=paths.tailscaleOrigin??readTailscaleConfig(paths.dataRoot)?.url;if(origin)env.STRATA_TAILSCALE_ORIGIN=tailscaleOrigin(origin);}
   if(smoke)env.STRATA_SETTINGS_FILE=join(dirname(profile),'app-settings.json');
   return env;
 }
-export function isBusy(native,serving,maintenance,agent){return !!(agent?.activeTurns||maintenance?.activeRequests||native?.jobs?.some(job=>job.state==='running')||native?.instances?.some(i=>(i.metrics?.live?.running??0)>0||(i.metrics?.live?.queued??0)>0)||serving?.stats?.running||serving?.stats?.waiting||serving?.requests?.some(r=>['queued','generating'].includes(r.state)));}
+export function isBusy(native,serving,maintenance,agent,managed){return !!(managed?.switching||managed?.activeRequests||managed?.queuedRequests||agent?.activeTurns||maintenance?.activeRequests||native?.jobs?.some(job=>job.state==='running')||native?.instances?.some(i=>(i.metrics?.live?.running??0)>0||(i.metrics?.live?.queued??0)>0)||serving?.stats?.running||serving?.stats?.waiting||serving?.requests?.some(r=>['queued','generating'].includes(r.state)));}
 function command(file,args,timeout=15000){return new Promise((ok,bad)=>{execFile(file,args,{encoding:'utf8',windowsHide:true,timeout,maxBuffer:1024*1024},(err,stdout)=>err?bad(fail('Windows could not complete the application operation.')):ok(stdout));});}
 export async function processIdentity(pid,{run=command}={}){
   if(!Number.isSafeInteger(pid)||pid<=0)return null;
@@ -63,15 +63,23 @@ export function ownsProcess(paths,record,actual){
   return allowed&&same(actual.executable??'',paths.node)&&same(record.executable??'',paths.node)&&!!script&&same(script,record.entry);
 }
 async function ownedRecord(paths){if(!existsSync(paths.pidFile))return null;let record;try{record=json(paths.pidFile);}catch{return null;}return ownsProcess(paths,record,await processIdentity(record.pid))?record:null;}
-async function request(record,path,{method='GET',body,token}={}){const response=await fetch(`http://127.0.0.1:${record.port}${path}`,{method,headers:{'x-strata-client':'strata-managed-launcher',...(body?{'content-type':'application/json'}:{}),...(token?{'x-strata-updater':token}:{})},body:body?JSON.stringify(body):undefined,signal:AbortSignal.timeout(method==='GET'?5000:360000)});if(!response.ok)throw fail(response.status===409?'回答やモデルの処理が終わってから、もう一度お試しください。':'The Strata host did not accept the operation.');return response;}
-async function snapshot(record){const [native,serving,maintenance,agent]=await Promise.all([request(record,'/api/native').then(r=>r.json()),request(record,'/api/serving').then(r=>r.json()),request(record,'/api/update-maintenance').then(r=>r.json()),request(record,'/api/agent/status').then(r=>r.json())]);return{native,serving,maintenance,agent};}
+async function request(record,path,{method='GET',body,token,optional=false}={}){const response=await fetch(`http://127.0.0.1:${record.port}${path}`,{method,headers:{'x-strata-client':'strata-managed-launcher',...(body?{'content-type':'application/json'}:{}),...(token?{'x-strata-updater':token}:{})},body:body?JSON.stringify(body):undefined,signal:AbortSignal.timeout(method==='GET'?5000:360000)});if(optional&&response.status===404)return null;if(!response.ok)throw fail(response.status===409?'回答やモデルの処理が終わってから、もう一度お試しください。':'The Strata host did not accept the operation.');return response;}
+async function snapshot(record){
+  const [native,serving,maintenance,agent,managed]=await Promise.all(['/api/native','/api/serving','/api/update-maintenance','/api/agent/status','/api/managed-models'].map(path=>request(record,path,{optional:path==='/api/managed-models'}).then(r=>r?.json())));
+  return {native,serving,maintenance,agent,managed};
+}
 async function health(record){const [page,native,providers,chats]=await Promise.all([request(record,'/').then(r=>r.text()),request(record,'/api/native').then(r=>r.json()),request(record,'/api/model-providers').then(r=>r.json()),request(record,'/api/chats').then(r=>r.json())]);if(!page.includes('id="root"')||!Array.isArray(native.instances)||!Array.isArray(native.jobs)||!Array.isArray(providers.connections)||!chats)throw fail('The application startup check failed.');return{native,providers,chats};}
 async function portFree(preferred=8792){const server=createServer();try{await new Promise((ok,bad)=>{server.once('error',bad);server.listen(preferred,'127.0.0.1',ok);});}catch{await new Promise((ok,bad)=>{server.once('error',bad);server.listen(0,'127.0.0.1',ok);});}const port=server.address().port;await new Promise(ok=>server.close(ok));return port;}
-async function startHost(paths,active,{profile=paths.profile,smoke=false}={}){
+async function startHost(paths,active,{profile=paths.profile,smoke=false,managedModels=!smoke}={}){
   const port=await portFree(smoke?0:8792),entry=join(active.hostRoot,'server/index.mjs');
   const logs=join(paths.dataRoot,'logs');mkdirSync(logs,{recursive:true});
   const suffix=smoke?'-smoke-'+randomUUID().slice(0,8):'',out=openSync(join(logs,'host'+suffix+'.stdout.log'),'a',0o600),err=openSync(join(logs,'host'+suffix+'.stderr.log'),'a',0o600);
-  const env=hostEnvironment(paths,active,port,{profile,smoke});
+  const env=hostEnvironment(paths,active,port,{profile,smoke,managedModels});
+  if(env.STRATA_MANAGED_MODELS_CONFIG){
+    // An explicit adapter in the user's existing local file, retained across host and installer upgrades.
+    const preload=json(env.STRATA_MANAGED_MODELS_CONFIG).compactionPreload;
+    if(typeof preload==='string'&&isAbsolute(preload)&&existsSync(preload))env.NODE_OPTIONS='--import='+pathToFileURL(preload).href;
+  }
   env.STRATA_SHUTDOWN_TOKEN=randomUUID()+randomUUID();
   const child=spawn(paths.node,[entry,'--dist',join(active.hostRoot,'dist')],{cwd:active.hostRoot,detached:true,windowsHide:true,env,stdio:['ignore',out,err]});closeSync(out);closeSync(err);let failed;child.once('error',error=>{failed=error;});child.unref();
   let actual=null;for(let i=0;i<10&&!actual;i++){if(failed||child.exitCode!==null)throw fail('The Strata host could not start.');actual=await processIdentity(child.pid);if(!actual)await sleep(200);}
@@ -85,7 +93,7 @@ export async function stopHost(paths,{token,record,modelsOnly=false}={}){
   if(!record){if(modelsOnly)throw fail('Strataの実行状態を確認できません。画面を開き直してください。');return;}
   if(!token){
     const before=await snapshot(record);
-    if(isBusy(before.native,before.serving,before.maintenance,before.agent))throw fail('回答やモデルの処理が終わってから、もう一度お試しください。');
+    if(isBusy(before.native,before.serving,before.maintenance,before.agent,before.managed))throw fail('回答やモデルの処理が終わってから、もう一度お試しください。');
     if(before.maintenance.active)throw fail('Strataの更新処理が終わってから、もう一度お試しください。');
     const id=randomUUID(),renew=()=>atomicJson(paths.maintenanceFile,{pid:process.pid,id,reason:'stop',expiresAt:Date.now()+120000});renew();
     const timer=setInterval(renew,20000);timer.unref();
@@ -94,9 +102,17 @@ export async function stopHost(paths,{token,record,modelsOnly=false}={}){
   }
   const current=await snapshot(record);
   if(!current.maintenance.enabled||!current.maintenance.active)throw fail('Strata could not guard the shutdown. Try again after updating the app.');
-  if(isBusy(current.native,current.serving,current.maintenance,current.agent))throw fail('回答やモデルの処理が終わってから、もう一度お試しください。');
+  if(isBusy(current.native,current.serving,current.maintenance,current.agent,current.managed))throw fail('回答やモデルの処理が終わってから、もう一度お試しください。');
   for(const instance of current.native.instances)if(modelsOnly||instance.status!=='error')await request(record,`/api/native/instances/${encodeURIComponent(instance.id)}/unload`,{method:'POST',token});
-  if(modelsOnly)return;
+  if(modelsOnly){
+    if(current.managed?.enabled&&current.managed.activeIds?.length){
+      const stop=json(join(paths.dataRoot,'managed-models.json')).stopCommand;
+      if(!stop)throw fail('保存済みモデルの停止設定が見つかりません。');
+      const {runManagedCommand}=await import(pathToFileURL(join(dirname(record.entry),'managed-local-models.mjs')));
+      await runManagedCommand(stop);
+    }
+    return;
+  }
   if(!ownsProcess(paths,record,await processIdentity(record.pid)))throw fail('The Strata process changed while closing.');
   if(record.shutdownToken){
     const response=await fetch(`http://127.0.0.1:${record.port}/api/control/shutdown`,{method:'POST',headers:{'x-strata-client':'strata-managed-launcher','x-strata-shutdown':record.shutdownToken,...(token?{'x-strata-updater':token}:{})},signal:AbortSignal.timeout(5000)});
@@ -105,7 +121,22 @@ export async function stopHost(paths,{token,record,modelsOnly=false}={}){
   await waitExit(record.pid);
   try{if(json(paths.pidFile).pid===record.pid)unlinkSync(paths.pidFile);}catch{}
 }
-async function smokeCandidate(paths,active){const dir=join(paths.dataRoot,'update-smoke',randomUUID());mkdirSync(dir,{recursive:true});const profile=join(dir,'profile');if(existsSync(paths.profile))cpSync(paths.profile,profile,{recursive:true});const record=await startHost(paths,active,{profile,smoke:true});try{await health(record);}finally{if(ownsProcess(paths,record,await processIdentity(record.pid))){process.kill(record.pid);await waitExit(record.pid);}}}
+async function smokeCandidate(paths,active,previousManaged){
+  const dir=join(paths.dataRoot,'update-smoke',randomUUID());mkdirSync(dir,{recursive:true});
+  const profile=join(dir,'profile');if(existsSync(paths.profile))cpSync(paths.profile,profile,{recursive:true});
+  const record=await startHost(paths,active,{profile,smoke:true,managedModels:true});
+  try{
+    await health(record);
+    if(previousManaged?.enabled){
+      const candidate=await (await request(record,'/api/managed-models')).json();
+      if(!candidate.enabled||candidate.connectionId!==previousManaged.connectionId||candidate.models.length!==previousManaged.models.length||
+        previousManaged.models.some(old=>!candidate.models.some(model=>model.id===old.id&&model.modelId===old.modelId&&
+          model.contextMax===old.contextMax&&(old.thinkingBudget===undefined||model.thinkingBudget===old.thinkingBudget)))){
+        throw fail('The update did not retain the saved model registration and settings.');
+      }
+    }
+  }finally{if(ownsProcess(paths,record,await processIdentity(record.pid))){process.kill(record.pid);await waitExit(record.pid);}}
+}
 async function restoreModels(record,models,token){for(let index=0;index<models.length;index++){const job=await(await request(record,'/api/native/operations',{method:'POST',token,body:{kind:'load',args:{model:models[index],multiple:index>0}}})).json();let done=false;for(let attempt=0;attempt<900;attempt++){const value=await(await request(record,'/api/native')).json(),current=value.jobs.find(j=>j.id===job.id);if(current?.state==='error')throw fail('The previous model could not be restored.');if(current?.state==='done'){done=true;break;}await sleep(1000);}if(!done)throw fail('The model is still loading. Open Strata to check its progress.');}}
 async function updateControl(paths,active,release){
   const env=hostEnvironment(paths,active,8792);delete env.STRATA_NO_ACQUIRE;
@@ -120,19 +151,19 @@ async function autoUpdate(paths,active,log,release){
     log('新しい本家バージョンはコーディング機能と一緒に更新するため、Windows版の更新通知からインストールしてください。');
     return {active,status:'deferred-installer'};
   }
-  const prior=await ownedRecord(paths);if(prior){const state=await snapshot(prior);if(isBusy(state.native,state.serving,state.maintenance,state.agent)){log('回答やモデルの処理中のため、更新を次回に回します。');return {active,status:'deferred'};}}
+  const prior=await ownedRecord(paths);if(prior){const state=await snapshot(prior);if(isBusy(state.native,state.serving,state.maintenance,state.agent,state.managed)){log('回答やモデルの処理中のため、更新を次回に回します。');return {active,status:'deferred'};}}
   const candidate=validateActive(paths,await stageForkRelease({root:paths.dataRoot,release,pythonExe:join(paths.control,'python/python.exe'),log}));
   const id=randomUUID(),renew=()=>atomicJson(paths.maintenanceFile,{pid:process.pid,id,reason:'update',expiresAt:Date.now()+120000});renew();const timer=setInterval(renew,20000);timer.unref();
-  let backup,promoted=false,models=[],controlAttempted=false;
+  let backup,previousManaged,promoted=false,models=[],controlAttempted=false;
   const controlPointer=join(paths.dataRoot,'components/control/active.json'),oldControl=existsSync(controlPointer)?json(controlPointer):null;
   try{
-    const running=await ownedRecord(paths);if(running){const state=await snapshot(running);if(!state.maintenance.enabled||!state.maintenance.active||isBusy(state.native,state.serving,state.maintenance,state.agent))return {active,status:'deferred'};models=state.native.instances.filter(i=>i.status==='ready').map(i=>i.model);}
+    const running=await ownedRecord(paths);if(running){const state=await snapshot(running);if(!state.maintenance.enabled||!state.maintenance.active||isBusy(state.native,state.serving,state.maintenance,state.agent,state.managed))return {active,status:'deferred'};previousManaged=state.managed;models=state.native.instances.filter(i=>i.status==='ready').map(i=>i.model);}
     // Let the last completed answer's autosave settle; new inference is already blocked.
     await sleep(1500);
     backup=join(paths.dataRoot,'backups',new Date().toISOString().replace(/[:.]/g,'-')+'-'+randomUUID().slice(0,8));mkdirSync(backup,{recursive:true});if(existsSync(paths.profile))cpSync(paths.profile,join(backup,'profile'),{recursive:true});
     if(running)await stopHost(paths,{record:running,token:id});
     if(versionCompare(candidate.version,active.version)>0){controlAttempted=true;await updateControl(paths,active,release);}
-    await smokeCandidate(paths,candidate);
+    await smokeCandidate(paths,candidate,previousManaged);
     const next={...candidate,releaseTag:release.tag_name,previous:active};atomicJson(paths.activeFile,next);promoted=true;
     const record=await startHost(paths,next);await restoreModels(record,models,id);log('新しいモデル切替版を反映しました。');return {active:next,status:'applied'};
   }catch(error){
@@ -149,7 +180,7 @@ export function sharingRestartNeeded(record,origin){return (record?.tailscaleOri
 async function restartForSharing(paths,active,record){
   const id=randomUUID(),renew=()=>atomicJson(paths.maintenanceFile,{pid:process.pid,id,reason:'update',expiresAt:Date.now()+120000});renew();const timer=setInterval(renew,20000);timer.unref();
   let models=[],stopped=false;
-  try{const state=await snapshot(record);if(!state.maintenance.enabled||!state.maintenance.active||isBusy(state.native,state.serving,state.maintenance,state.agent))throw fail('回答やモデルの処理が終わってから、もう一度共有設定を実行してください。');models=state.native.instances.filter(i=>i.status==='ready').map(i=>i.model);await sleep(1500);await stopHost(paths,{record,token:id});stopped=true;const next=await startHost(paths,active);await restoreModels(next,models,id);return next;}
+  try{const state=await snapshot(record);if(!state.maintenance.enabled||!state.maintenance.active||isBusy(state.native,state.serving,state.maintenance,state.agent,state.managed))throw fail('回答やモデルの処理が終わってから、もう一度共有設定を実行してください。');models=state.native.instances.filter(i=>i.status==='ready').map(i=>i.model);await sleep(1500);await stopHost(paths,{record,token:id});stopped=true;const next=await startHost(paths,active);await restoreModels(next,models,id);return next;}
   catch(error){if(stopped){const failed=await ownedRecord(paths);if(failed)await stopHost(paths,{record:failed,token:id});paths.tailscaleOrigin=record.tailscaleOrigin??'';const restored=await startHost(paths,active);await restoreModels(restored,models,id);}throw error;}
   finally{clearInterval(timer);try{if(json(paths.maintenanceFile).id===id)unlinkSync(paths.maintenanceFile);}catch{}}
 }
@@ -187,7 +218,7 @@ export async function main(args=process.argv.slice(2),options={}){
   }
   if(args.includes('--tailscale-off')){
     const saved=readTailscaleConfig(paths.dataRoot);if(!saved)return{disabled:true,changed:false};
-    let record=await ownedRecord(paths);if(record){const state=await snapshot(record);if(isBusy(state.native,state.serving,state.maintenance,state.agent))throw fail('回答やモデルの処理が終わってから、共有を停止してください。');}
+    let record=await ownedRecord(paths);if(record){const state=await snapshot(record);if(isBusy(state.native,state.serving,state.maintenance,state.agent,state.managed))throw fail('回答やモデルの処理が終わってから、共有を停止してください。');}
     const result=await disableTailscale({dataRoot:paths.dataRoot});paths.tailscaleOrigin='';
     if(record&&sharingRestartNeeded(record,''))record=await restartForSharing(paths,active,record);
     log('Tailscale共有を停止しました。');return {...result,localUrl:record?`http://127.0.0.1:${record.port}/#/chat`:null,tailscaleUrl:null};
@@ -204,7 +235,7 @@ export async function main(args=process.argv.slice(2),options={}){
   let shared=null;
   if(sharingPlan){try{shared=await applyTailscale({dataRoot:paths.dataRoot,hostPort:record.port,plan:sharingPlan});log('Tailscale共有: '+shared.url);}catch(error){if(args.includes('--tailscale')){if(error.actionUrl&&!args.includes('--no-browser'))await showBrowser(error.actionUrl);throw error;}log('Tailscale共有を再開できませんでした。ローカル画面を開きます。');}}
   const coding=args.includes('--coding')?await configureCoding(paths,record,{accepted:args.includes('--coding-accept')}):null;
-  const first=!existsSync(join(paths.dataRoot,'first-run.json')),target=coding?.target??(args.includes('--api')?'#/settings?section=Models':args.includes('--models')||first?'#/models':'#/chat');
+  const first=!existsSync(join(paths.dataRoot,'first-run.json')),target=coding?.target??(args.includes('--api')?'#/settings?section=Models':args.includes('--models')||first&&!existsSync(join(paths.dataRoot,'managed-models.json'))?'#/models':'#/chat');
   const localUrl=`http://127.0.0.1:${record.port}/${target}`,url=shared?`${shared.url}/${target}`:localUrl;
   if(!args.includes('--no-browser')){if(!args.includes('--desktop'))await showBrowser(url);atomicJson(join(paths.dataRoot,'first-run.json'),{openedAt:new Date().toISOString()});}
   return {ok:true,version:active.version,releaseTag:active.releaseTag,updateStatus,installedReleaseTag:bundled.releaseTag,latestInstallerTag:latest?.installer&&releaseIsNew(latest,bundled)?latest.tag_name:null,url,localUrl,tailscaleUrl:shared?.url??null,pid:record.pid,tailscale:!!shared};
