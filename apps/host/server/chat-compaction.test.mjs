@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createHash } from 'node:crypto';
 import { ChatCompactionError, createChatCompactor } from './chat-compaction.mjs';
 
 const response = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
@@ -280,4 +281,240 @@ test('a queued turn can be cancelled immediately without releasing another turn 
   const [a, c] = await Promise.all([first, third]);
   assert.equal(c.compaction.cached, true);
   assert.equal(api.summaries().length, a.compaction.summaryRequests);
+});
+
+test('a model that only remembers its current excerpt cannot overwrite earlier requirements', async () => {
+  const payload = history();
+  payload.messages[1].content = 'The user requires CONDITION_FIRST.\n' + 'old-log '.repeat(1600);
+  payload.messages[2].content = 'Recorded CONDITION_MIDDLE.\n' + 'details '.repeat(1600);
+  const api = mock({ summary: body => {
+    const excerpt = body.messages[1].content.split('Quoted transcript excerpt:\n')[1];
+    assert(!body.messages[1].content.includes('Previous summary:'), 'later pieces must not rewrite earlier notes');
+    const facts = [...excerpt.matchAll(/CONDITION_(?:FIRST|MIDDLE)/g)].map(m => m[0]);
+    return response({ choices: [{ finish_reason: 'stop', message: { content: facts.length ? facts.join('; ') : 'Observed work: completed checks.' } }] });
+  } });
+  const result = await factory(api)({ model, payload });
+  const input = JSON.stringify(result.payload.messages);
+  assert.match(input, /CONDITION_FIRST/);
+  assert.match(input, /CONDITION_MIDDLE/);
+  assert(api.summaries().length > 2);
+});
+
+test('incremental compaction appends new sections and keeps saved earlier conditions verbatim after restart', async t => {
+  const directory = folder(t), api = mock({ summary: () => response({ choices: [{ finish_reason: 'stop', message: {
+    content: JSON.stringify({ requirements: 'Keep KEY-ALPHA.', observations: 'The selected value is KEY-BETA.', unresolved: '' }),
+  } }] }) }), payload = history();
+  await factory(api, { dataDir: directory })({ model, payload, chatId: 'incremental' });
+  const file = join(directory, 'chat-compaction', readdirSync(join(directory, 'chat-compaction'))[0]);
+  const first = JSON.parse(readFileSync(file, 'utf8'));
+  const next = structuredClone(payload);
+  next.messages.push({ role: 'assistant', content: 'Acknowledged.' },
+    { role: 'user', content: 'The user additionally requires NEW-CONDITION. ' + 'later '.repeat(5000) },
+    { role: 'assistant', content: 'progress '.repeat(400) }, { role: 'user', content: 'Continue with all requirements.' });
+  const later = mock({ summary: () => response({ choices: [{ finish_reason: 'stop', message: {
+    content: JSON.stringify({ requirements: 'NEW-CONDITION applies.', observations: 'More checks completed.', unresolved: '' }),
+  } }] }) });
+  const result = await factory(later, { dataDir: directory })({ model, payload: next, chatId: 'incremental' });
+  const saved = JSON.parse(readFileSync(file, 'utf8'));
+  assert(saved.end > first.end);
+  assert.deepEqual(saved.sections.slice(0, first.sections.length), first.sections);
+  assert.match(JSON.stringify(result.payload.messages), /KEY-ALPHA/);
+  assert.match(JSON.stringify(result.payload.messages), /NEW-CONDITION/);
+  assert(later.summaries().every(call => !call.body.messages[1].content.includes('KEY-ALPHA')),
+    'an unrelated new excerpt never gets authority to rewrite old requirements');
+});
+
+test('later user corrections stay later than the requirements they replace', async () => {
+  const payload = history();
+  payload.messages[1].content = 'User decision: release requires 17 passing tests.\n' + 'logs '.repeat(2000);
+  payload.messages[2].content = 'The assistant observed 37 completed diagnostics.\n' + 'details '.repeat(1500);
+  payload.messages.splice(3, 0, { role: 'user', content: 'Explicit correction: release now requires 19 passing tests.\n' + 'new logs '.repeat(1500) },
+    { role: 'assistant', content: 'Acknowledged the correction.' });
+  const api = mock({ summary: body => {
+    const excerpt = body.messages[1].content.split('Quoted transcript excerpt:\n')[1];
+    const facts = [];
+    if (excerpt.includes('17 passing tests')) facts.push('User decision: 17 passing tests.');
+    if (excerpt.includes('19 passing tests')) facts.push('Later user correction: 19 passing tests.');
+    return response({ choices: [{ finish_reason: 'stop', message: { content: facts.join(' ') || 'Observed work: completed diagnostics.' } }] });
+  } });
+  const result = await factory(api)({ model, payload });
+  const input = result.payload.messages.map(m => text(m.content)).join('\n');
+  assert(input.indexOf('17 passing tests') >= 0);
+  assert(input.indexOf('19 passing tests') > input.indexOf('17 passing tests'));
+  assert.match(input, /Newer explicit user corrections supersede earlier user requirements/);
+  assert.match(input, /assistant claims and tool observations do not themselves change user requirements/);
+});
+
+test('old rolling-summary caches cannot hide facts lost before the new policy', async t => {
+  const directory = folder(t), api = mock(), payload = history(), chatId = 'old-cache';
+  const compact = factory(api, { dataDir: directory });
+  const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+  const scope = digest([2, chatId, model.id, model.baseUrl]);
+  const old = { version: 1, end: 2, hash: digest([[payload.messages[0]], payload.messages.slice(1, 3)]),
+    summary: 'Only the last batch remains. LOST-EARLIER-FACTS.', at: Date.now() };
+  writeFileSync(join(directory, 'chat-compaction', scope + '.json'), JSON.stringify(old));
+  const result = await compact({ model, payload, chatId });
+  assert(api.summaries().length > 0, 'old checkpoint must be rebuilt from original history');
+  assert.match(JSON.stringify(result.payload.messages), /KEY-ALPHA/);
+  assert(!JSON.stringify(result.payload.messages).includes('LOST-EARLIER-FACTS'));
+  const saved = JSON.parse(readFileSync(join(directory, 'chat-compaction', scope + '.json'), 'utf8'));
+  assert.equal(saved.version, 2); assert(saved.sections.length > 0);
+});
+
+test('oversized assembled checkpoints shrink individual sections without dropping any source condition', async t => {
+  let next = 0, shortened = 0;
+  const api = mock({ summary: body => {
+    const text = body.messages[1].content;
+    if (text.includes('Quoted checkpoint section:\n')) {
+      shortened++;
+      return response({ choices: [{ finish_reason: 'stop', message: { content: text.match(/KEEP_\d+/)[0] + ' remains a user requirement.' } }] });
+    }
+    return response({ choices: [{ finish_reason: 'stop', message: { content: `KEEP_${++next} is required. ` + 'Repeated observations. '.repeat(650) } }] });
+  } });
+  const directory = folder(t), result = await factory(api, { dataDir: directory })({ model, payload: history(), chatId: 'growth' });
+  const input = JSON.stringify(result.payload.messages);
+  for (let i = 1; i <= next; i++) assert(input.includes(`KEEP_${i} `), `source condition ${i} was lost`);
+  assert(shortened > 0);
+  assert(result.compaction.afterTokens + 1024 + 256 <= model.contextMax);
+  const saved = JSON.parse(readFileSync(join(directory, 'chat-compaction', readdirSync(join(directory, 'chat-compaction'))[0]), 'utf8'));
+  assert.equal(saved.sections.length, next);
+  assert.equal(new Set(saved.sections.map(s => s.id)).size, next);
+  assert(saved.summary.length <= 48000);
+});
+
+test('failed or cancelled checkpoint shrinking leaves the earlier valid cache intact', async t => {
+  for (const cancel of [false, true]) {
+    const directory = folder(t), initial = mock(), payload = history(), chatId = 'growth-transaction';
+    await factory(initial, { dataDir: directory })({ model, payload, chatId });
+    const file = join(directory, 'chat-compaction', readdirSync(join(directory, 'chat-compaction'))[0]);
+    const before = readFileSync(file, 'utf8'), controller = new AbortController();
+    const reason = new DOMException('Stopped checkpoint shrinking', 'AbortError');
+    const next = structuredClone(payload);
+    next.messages.push({ role: 'assistant', content: 'Acknowledged.' }, { role: 'user', content: 'More work. ' + 'later '.repeat(5000) },
+      { role: 'assistant', content: 'progress '.repeat(400) }, { role: 'user', content: 'Continue.' });
+    const api = mock({ summary: body => {
+      if (body.messages[1].content.includes('Quoted checkpoint section:\n')) {
+        if (cancel) controller.abort(reason);
+        return response({ choices: [{ finish_reason: 'length', message: { content: 'An incomplete checkpoint.' } }] });
+      }
+      return response({ choices: [{ finish_reason: 'stop', message: { content: 'New requirement. ' + 'Huge observations. '.repeat(800) } }] });
+    } });
+    await assert.rejects(factory(api, { dataDir: directory })({ model, payload: next, chatId, signal: controller.signal }),
+      error => cancel ? error === reason : error.code === 'context-compaction-insufficient-room');
+    assert.equal(readFileSync(file, 'utf8'), before, 'never publish a partial or incomplete replacement');
+  }
+});
+
+test('explicit requirements are retrieved after observations without treating diagnostic numbers as requirements', async () => {
+  const api = mock({ summary: body => {
+    const excerpt = body.messages[1].content.split('Quoted transcript excerpt:\n')[1];
+    const note = { requirements: excerpt.includes('KEY-ALPHA') ? 'User requires KEY-ALPHA.' : '',
+      observations: 'The assistant observed 37 diagnostic records.', unresolved: 'Check the remaining work.' };
+    return response({ choices: [{ finish_reason: 'stop', message: { content: '```json\n' + JSON.stringify(note) + '\n```' } }] });
+  } });
+  const payload = history(), result = await factory(api)({ model, payload });
+  const input = result.payload.messages[1].content;
+  const ledger = input.lastIndexOf('User requirements and decisions, in chronological order.');
+  assert(ledger > input.lastIndexOf('37 diagnostic records'));
+  assert(input.indexOf('User requires KEY-ALPHA.') > ledger);
+  assert.equal(input.match(/User requires KEY-ALPHA\./g).length, 1, 'requirements must not be buried in duplicated observations');
+  assert.equal(result.payload.messages.at(-1), payload.messages.at(-1));
+});
+
+test('plain or incorrectly typed structured responses remain unclassified history instead of becoming invented requirements', async () => {
+  const variants = ['Requirements stay in this plain note.', '{"requirements":["not a string"],"observations":"37 diagnostics","unresolved":""}',
+    '{"requirements":"unfinished JSON'];
+  for (const content of variants) {
+    const api = mock({ summary: () => response({ choices: [{ finish_reason: 'stop', message: { content } }] }) });
+    const result = await factory(api)({ model, payload: history() });
+    const input = result.payload.messages[1].content;
+    assert(input.includes(content));
+    assert(input.includes('Unclassified history note:'));
+    assert(!input.includes('User requirements and decisions, in chronological order.'));
+  }
+});
+
+test('shrinking observations preserves exact requirements and source ordering even if the shortening model does not know them', async t => {
+  let n = 0, shrunk = 0;
+  const requirements = [];
+  const api = mock({ summary: body => {
+    let note;
+    if (body.messages[1].content.includes('Quoted checkpoint section:\n')) {
+      const excerpt = JSON.parse(body.messages[1].content.split('Quoted checkpoint section:\n')[1]);
+      assert(!Object.hasOwn(excerpt, 'requirements'), 'the shortening model never gets to rewrite requirements');
+      shrunk++;
+      note = { observations: 'Recorded work completed.', unresolved: 'Run the pending check.' };
+    } else {
+      const requirement = `条件${++n}: keep exact value 17, path src/check-${n}.mjs, and --no-delete.\nThis remains mandatory.`;
+      requirements.push(requirement);
+      note = { requirements: requirement, observations: 'Repeated diagnostic observation. '.repeat(450), unresolved: 'Run the pending check.' };
+    }
+    return response({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify(note) } }] });
+  } });
+  const directory = folder(t), result = await factory(api, { dataDir: directory })({ model, payload: history(), chatId: 'immutable-requirements' });
+  const file = join(directory, 'chat-compaction', readdirSync(join(directory, 'chat-compaction'))[0]);
+  const saved = JSON.parse(readFileSync(file, 'utf8'));
+  assert(shrunk > 0);
+  assert.deepEqual(saved.sections.map(section => section.requirements), requirements);
+  const input = result.payload.messages[1].content;
+  let last = -1;
+  for (const requirement of requirements) {
+    const position = input.indexOf(requirement);
+    assert(position > last); last = position;
+  }
+  assert(result.compaction.afterTokens + 1024 + 256 <= model.contextMax);
+});
+
+test('requirements that cannot fit produce a controlled failure without rewriting or silently dropping them', async t => {
+  const directory = folder(t), api = mock({ summary: body => {
+    assert(!body.messages[1].content.includes('Quoted checkpoint section:'), 'immutable requirements cannot be shortened');
+    return response({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify({
+      requirements: 'Every explicit condition must be preserved. '.repeat(400), observations: '', unresolved: '',
+    }) } }] });
+  } });
+  await assert.rejects(factory(api, { dataDir: directory })({ model, payload: history() }), error => error.code === 'context-compaction-insufficient-room');
+  assert.equal(readdirSync(join(directory, 'chat-compaction')).length, 0);
+});
+
+test('a late condition in a split user message retains its role separately from following assistant output', async () => {
+  const payload = history();
+  payload.messages[1].content = 'filler '.repeat(3800) + 'The release requires EXACT-LATE-CONDITION.';
+  payload.messages[2].content = 'Assistant observation: 37 diagnostics completed.';
+  let found = false;
+  const api = mock({ summary: body => {
+    const excerpt = body.messages[1].content.split('Quoted transcript excerpt:\n')[1];
+    if (excerpt.includes('EXACT-LATE-CONDITION')) {
+      found = true;
+      assert.match(excerpt, /\[Original message 1; role "user"; continued fragment\]/);
+      assert(excerpt.indexOf('role "user"') < excerpt.indexOf('EXACT-LATE-CONDITION'));
+      assert(excerpt.indexOf('role "assistant"') > excerpt.indexOf('EXACT-LATE-CONDITION'));
+    }
+    return response({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify({
+      requirements: excerpt.includes('EXACT-LATE-CONDITION') ? 'The release requires EXACT-LATE-CONDITION.' : '',
+      observations: 'Diagnostics observed.', unresolved: '',
+    }) } }] });
+  } });
+  const result = await factory(api)({ model, payload });
+  assert(found);
+  assert.match(result.payload.messages[1].content, /The release requires EXACT-LATE-CONDITION/);
+});
+
+test('a later plain-text correction remains after earlier structured requirements in the final ledger', async () => {
+  const payload = history();
+  payload.messages[1].content = 'Release requires 17 passing tests.\n' + 'old logs '.repeat(1500);
+  payload.messages[2].content = 'Observed diagnostics.\n' + 'details '.repeat(1500);
+  payload.messages.splice(3, 0, { role: 'user', content: 'Explicit correction: release now requires 19 passing tests.\n' + 'later logs '.repeat(1800) },
+    { role: 'assistant', content: 'Acknowledged.' });
+  const api = mock({ summary: body => {
+    const excerpt = body.messages[1].content.split('Quoted transcript excerpt:\n')[1];
+    const content = excerpt.includes('19 passing tests') ? 'Explicit user correction: release now requires 19 passing tests.'
+      : JSON.stringify({ requirements: excerpt.includes('17 passing tests') ? 'Release requires 17 passing tests.' : '',
+        observations: 'Diagnostics observed.', unresolved: '' });
+    return response({ choices: [{ finish_reason: 'stop', message: { content } }] });
+  } });
+  const result = await factory(api)({ model, payload });
+  const summary = result.payload.messages[1].content;
+  assert(summary.includes('17 passing tests'));
+  assert(summary.indexOf('19 passing tests') > summary.indexOf('17 passing tests'));
+  assert(summary.indexOf('Unclassified history note:') > summary.indexOf('17 passing tests'));
 });
