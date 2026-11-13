@@ -7,6 +7,19 @@ The repository includes `START-HERE.bat`, `SETUP.bat`, `UPDATE.bat`, `setup.sh` 
 Run them from a cloned or extracted **source folder**. They may install dependencies, prepare model files and
 acquire or build an engine. Check [model requirements](MODELS.md) before downloading.
 
+## Python requirement and existing environments
+
+Source setup requires Python 3.11 or newer and installs Pillow 13.0.0. Python 3.10 is no longer
+supported for the source runtime because its old Pillow pin is vulnerable when saving compressed TIFF images.
+The previous JPEG 2000 decoder restriction does not address this separate TIFF issue.
+
+If your checkout uses a Python 3.10 `.venv`, stop its server, install Python 3.11 or newer, and move
+only `.venv` to a backup name before rerunning setup. Keep model files, settings and run configurations.
+Do not downgrade Pillow to keep using Python 3.10. Existing environments are not automatically upgraded:
+a Python 3.11+ environment should also install the current `requirements.txt` before restarting.
+The packaged app and Terminal use their own Python 3.12 runtime. The separate standard-library-only
+portable monitor still supports Python 3.10 and does not use Pillow.
+
 ## Quick start
 
 | I use | Run in the source folder |
