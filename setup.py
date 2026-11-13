@@ -10036,6 +10036,11 @@ def mac_dsv41_setup(a) -> int:
 
 
 def main() -> int:
+    if sys.version_info < (3, 11):
+        print("Source setup requires Python 3.11 or newer for fixed Pillow 13.0.0. "
+              "Install a supported Python, move the old .venv aside, and rerun setup. "
+              "Keep your model files and settings; see docs/SOURCE_INSTALL.md.", file=sys.stderr)
+        return 1
     try:                                               # files made by a run as administrator still belong to the user
         from strata_control import private_files as _pf
         _pf.adopt_user_defaults()

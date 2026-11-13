@@ -93,11 +93,11 @@ class WheelLocks(unittest.TestCase):
                 self.assertNotIn("ninja", names)
 
     def test_pillow_is_the_patched_release_everywhere_it_is_pinned(self):
-        """#4220: 12.3.0's bundled OpenJPEG has a heap overflow (GHSA-78g4-xqwv-q3g8, fixed in 13.0.0). Pillow 13 needs Python 3.11, so
-        requirements.txt keeps 12.3.0 for 3.10 only; every hash-locked bundle (Python 3.12) carries 13.0.0 or later."""
+        """Source and bundled runtimes must not retain the vulnerable Python 3.10 fallback.
+        Pillow 13 fixes both the OpenJPEG and compressed TIFF save heap overflows."""
         lines = [l.split(" #")[0].strip() for l in (ROOT / "requirements.txt").read_text(encoding="utf-8").splitlines()]
         pillow = [l for l in lines if l.lower().startswith("pillow")]
-        self.assertEqual(sorted(pillow), ['pillow==12.3.0; python_version < "3.11"', 'pillow==13.0.0; python_version >= "3.11"'])
+        self.assertEqual(pillow, ['pillow==13.0.0'])
         for lock in self.locks():
             with self.subTest(lock.name):
                 version = pt.lock_names(lock)["pillow"]
