@@ -19,7 +19,7 @@ function fixture({unicode=false}={}){
   return {root,appRoot,dataRoot,paths:layout({appRoot,dataRoot}),active:{version:'0.2.12',commit:'a'.repeat(40),releaseTag:'managed-v0.2.12-4',hostRoot:join(appRoot,'host')}};
 }
 function prepareNode(f){try{linkSync(process.execPath,f.paths.node);}catch{copyFileSync(process.execPath,f.paths.node);}writeFileSync(join(f.paths.host,'server/private-file.mjs'),'export function makePrivateDir(){}');}
-function fakeHost(f,{busy=false,instance=false,agentBusy=false,managed=false}={}){
+function fakeHost(f,{busy=false,instance=false,agentBusy=false,managed=false,managedLoaded=managed}={}){
   writeFileSync(join(f.paths.host,'server/index.mjs'),`import http from 'node:http';import{writeFileSync,readFileSync}from'node:fs';import{join,dirname}from'node:path';let busy=${busy},instance=${instance},agentBusy=${agentBusy};
 const chats=new Map(),folders=new Map(),workspaces=[];
 const native=()=>({available:true,instances:instance?[{id:'fixture-model',status:'ready',model:'user-choice'}]:[],jobs:[],capabilities:{componentUpdates:true}});
@@ -34,7 +34,7 @@ if(path==='/api/native')value=native();
 else if(path==='/api/serving')value={stats:{running:0,waiting:0}};
 else if(path==='/api/update-maintenance')value={enabled:true,active:!!current,activeRequests:busy?1:0};
 else if(path==='/api/agent/status')value={state:'idle',activeTurns:agentBusy?1:0};
-else if(path==='/api/managed-models')value={enabled:${managed},activeIds:${managed ? "['saved-model']" : '[]'},activeRequests:0,queuedRequests:0,switching:false};
+else if(path==='/api/managed-models')value={enabled:${managed},activeIds:${managedLoaded ? "['saved-model']" : '[]'},activeRequests:0,queuedRequests:0,switching:false};
 else if(path==='/api/model-providers')value={connections:[]};
 else if(path==='/api/chats')value={chats:[...chats.values()]};
 else if(path.startsWith('/api/chats/')){const id=path.slice('/api/chats/'.length);if(req.method==='PUT'){chats.set(id,body);value={ok:true};}else if(chats.has(id))value={session:chats.get(id)};else{res.writeHead(404);res.end();return;}}
@@ -183,6 +183,30 @@ test('full shutdown stops saved managed models before closing the host and prese
     assert.equal(read(marker).stopped,true);assert.equal(read(join(f.dataRoot,'shutdown.json')).guarded,true);
     assert.equal(await processIdentity(running.pid),null);assert(!existsSync(f.paths.maintenanceFile));
   }finally{try{process.kill(running.pid);}catch{}}
+});
+test('closing the desktop releases an idle saved-model host even after stopping the model', {skip:process.platform!=='win32',timeout:90000},async()=>{
+  const f=fixture();prepareNode(f);fakeHost(f,{managed:true,managedLoaded:false});
+  const legacy=join(f.root,'saved install');
+  const bridge=join(legacy,'bin','reuse-saved-models.ps1');
+  const source=join(legacy,'config','managed-models.json');
+  mkdirSync(dirname(bridge),{recursive:true});mkdirSync(dirname(source),{recursive:true});
+  writeFileSync(bridge,'# saved-model adapter');writeFileSync(source,'{}');
+  writeFileSync(join(f.dataRoot,'managed-models.json'),JSON.stringify({settingsSource:source,stopCommand:{file:bridge,args:['-Mode','stop']}}));
+  let attempts=0;
+  const options={appRoot:f.appRoot,dataRoot:f.dataRoot,closeSavedHost:async(root,{modelsLoaded})=>{
+    assert.equal(root,legacy);assert.equal(modelsLoaded,false);
+    assert(existsSync(f.paths.maintenanceFile));assert(!existsSync(join(f.dataRoot,'shutdown.json')));
+    if(++attempts===1)throw Error('saved host still busy');
+  }};
+  const running=await main(['--desktop','--no-browser','--no-update'],options);
+  try{
+    await main(['--stop-models','--desktop'],options);assert.equal(attempts,0);
+    await assert.rejects(()=>main(['--stop','--wait'],options),/saved host still busy/);
+    assert.equal((await processIdentity(running.pid))?.pid,running.pid);
+    assert(!existsSync(f.paths.maintenanceFile));
+    assert.deepEqual(await main(['--stop','--wait'],options),{stopped:true});
+    assert.equal(attempts,2);assert.equal(await processIdentity(running.pid),null);
+  }finally{await stopHost(f.paths);}
 });
 test('Windows PowerShell CIM preserves Japanese and spaced process paths for owned-host shutdown', {skip:process.platform!=='win32',timeout:90000},async()=>{
   const f=fixture({unicode:true});prepareNode(f);fakeHost(f);const chosen=await port(),entry=join(f.paths.host,'server/index.mjs');
