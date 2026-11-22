@@ -35,16 +35,16 @@ export function bundlePath(path) {
   if (typeof path !== 'string' || path.includes('\\') || path.includes('\0') || isAbsolute(path)
     || path.split('/').some(part => !part || part === '.' || part === '..')) return false;
   if (['LICENSE', 'NOTICE', 'NOTICE.md'].includes(path)) return true;
-  return path.startsWith('apps/host/') && !path.split('/').some(part => ['node_modules', '.git', '.env', '.npmrc'].includes(part));
+  return path.startsWith('app/host/') && !path.split('/').some(part => ['node_modules', '.git', '.env', '.npmrc'].includes(part));
 }
 function inside(base, file) {
   const full = resolve(file), rel = relative(resolve(base), full);
   if (!rel || rel === '..' || rel.startsWith('..' + sep) || isAbsolute(rel)) throw new Error('A build file is outside the package directory.');
   return full;
 }
-export function command(file, args, { cwd, timeout = 300000 } = {}) {
+export function command(file, args, { cwd, timeout = 300000, env = process.env } = {}) {
   return new Promise((ok, bad) => {
-    const child = execFile(file, args, { cwd, timeout, windowsHide: true, maxBuffer: 8 * 1024 * 1024, env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never' } }, (error, stdout, stderr) => {
+    const child = execFile(file, args, { cwd, timeout, windowsHide: true, maxBuffer: 8 * 1024 * 1024, env: { ...env, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never' } }, (error, stdout, stderr) => {
       if (error) { bad(Object.assign(new Error('A merge, build, or verification command failed.'), { detail: String(stdout).slice(-12000) + String(stderr).slice(-12000) })); }
       else ok(String(stdout));
     });
@@ -111,7 +111,7 @@ export function buildFiles(root, tracked) {
       else throw new Error('Unsupported build output.');
     }
   }
-  walk(join(root, 'apps/host/dist'));
+  walk(join(root, 'app/host/dist'));
   return [...paths].filter(bundlePath).sort();
 }
 export async function packageHost(root, manifest, tracked) {
@@ -122,7 +122,9 @@ export async function packageHost(root, manifest, tracked) {
     const source = inside(root, join(root, ...path.split('/'))), stat = lstatSync(source);
     if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 64 * 1024 * 1024) throw new Error('An application file cannot be safely packaged.');
     bytes += stat.size; if (bytes > 512 * 1024 * 1024) throw new Error('The host package is larger than expected.');
-    const destination = inside(packageRoot, join(packageRoot, ...path.split('/')));
+    // Keep the archive layout consumed by installed updaters across the source tree rename.
+    const archivePath = path.replace(/^app\/host\//, 'apps/host/');
+    const destination = inside(packageRoot, join(packageRoot, ...archivePath.split('/')));
     mkdirSync(dirname(destination), { recursive: true }); copyFileSync(source, destination);
   }
   writeFileSync(join(packageRoot, 'managed-host.json'), JSON.stringify(manifest, null, 2));
@@ -162,7 +164,7 @@ async function upload(releaseId, file, name, type) {
 export async function main() {
   if (process.env.GITHUB_REPOSITORY !== FORK || !process.env.GITHUB_TOKEN || !process.env.RUNNER_TEMP
     || !/^[1-9]\d*$/.test(process.env.GITHUB_RUN_NUMBER ?? '')) throw new Error('Run this publisher in the configured fork workflow.');
-  const root = resolve(fileURLToPath(new URL('..', import.meta.url))), host = join(root, 'apps/host');
+  const root = resolve(fileURLToPath(new URL('..', import.meta.url))), host = join(root, 'app/host');
   const git = args => command('git', args, { cwd: root });
   const origin = (await git(['remote', 'get-url', 'origin'])).trim();
   if (![ `https://github.com/${FORK}`, `https://github.com/${FORK}.git` ].includes(origin)) throw new Error('The checkout is not the configured fork.');
@@ -199,11 +201,15 @@ export async function main() {
   await command(process.execPath, ['--test', 'server/chat-compaction.test.mjs', 'tests/chat-compaction-transport.test.mjs', 'tests/chat-history.test.mjs', 'tests/agent-auto-context.test.mjs'], { cwd: host });
   const installerTests=readdirSync(join(root,'managed-local/windows-installer')).filter(name=>name.endsWith('.test.mjs')).map(name=>'managed-local/windows-installer/'+name);
   if(installerTests.length)await command(process.execPath,['--test',...installerTests],{cwd:root});
-  const files = await git(['ls-files', '-z', '--', 'apps/host', 'LICENSE', 'NOTICE', 'NOTICE.md']);
+  const files = await git(['ls-files', '-z', '--', 'app/host', 'LICENSE', 'NOTICE', 'NOTICE.md']);
   const packaged = await packageHost(root, manifest, files);
   const tag = `managed-v${latest.version}-${process.env.GITHUB_RUN_NUMBER}`;
   console.log('Building and testing the standalone Windows installer.');
   const installer=await buildWindowsInstaller({repoRoot:root,hostSourceRoot:root,version:latest.version,commit,releaseTag:tag,outputDir:join(packaged.output,'windows-installer')});
+  // Exercise overflow recovery with the same Harness that this installer will ship.
+  await command(process.execPath, ['--test', 'tests/agent-auto-context.test.mjs', 'tests/agent-context.test.mjs'], {
+    cwd: host, env: { ...process.env, STRATA_HARNESS_DIR: join(installer.payload, 'resources/harness') },
+  });
   await verifyWindowsInstaller({installer:installer.installer,workRoot:join(packaged.output,'installer-test')});
   const releaseManifest=readJson(packaged.manifestFile);
   releaseManifest.installer={name:installer.installer.split(/[\\/]/).pop(),sha256:installer.sha256,size:installer.size};

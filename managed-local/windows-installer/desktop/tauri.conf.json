@@ -9,6 +9,6 @@
   },
   "bundle": {
     "active": false,
-    "icon": ["../../../apps/desktop/src-tauri/icons/icon.ico"]
+    "icon": ["../../../app/desktop/src-tauri/icons/icon.ico"]
   }
 }

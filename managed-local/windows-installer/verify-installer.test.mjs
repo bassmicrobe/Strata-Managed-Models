@@ -5,8 +5,8 @@ import {execFileSync} from 'node:child_process';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {createServer} from 'node:http';
-import {createModelProviders} from '../../apps/host/server/model-providers.mjs';
-import {createChatStore} from '../../apps/host/server/chat-store.mjs';
+import {createModelProviders} from '../../app/host/server/model-providers.mjs';
+import {createChatStore} from '../../app/host/server/chat-store.mjs';
 import {cleanPcEnvironment,exerciseInstalledProfile,runInstallerTest,waitForRemovedFiles} from './verify-installer.mjs';
 
 test('the clean-PC fixture removes every inherited ProgramFiles alias and PATH casing without changing its source',()=>{

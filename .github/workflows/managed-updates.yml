@@ -13,7 +13,7 @@ on:
   push:
     branches: [managed-models]
     paths:
-      - 'apps/host/**'
+      - 'app/host/**'
       - 'managed-local/**'
       - '.github/workflows/managed-updates.yml'
 
@@ -39,7 +39,7 @@ jobs:
         with:
           node-version: '24.12.0'
           cache: npm
-          cache-dependency-path: apps/host/package-lock.json
+          cache-dependency-path: app/host/package-lock.json
       - name: Prepare Windows installer compiler
         shell: pwsh
         run: |

@@ -98,7 +98,7 @@ export async function inspectInstalledCoding(port,{data,expected}={}){
 
 /** No model weights: the installed Harness and command executor use a scripted loopback model. */
 export async function exerciseInstalledHarness(port,{app,coding}={}){
-  const {startScriptedWorker}=await import('../../apps/host/tests/helpers/scripted-worker.mjs');
+  const {startScriptedWorker}=await import('../../app/host/tests/helpers/scripted-worker.mjs');
   const worker=await startScriptedWorker({model:'installer-tool-model',chunkDelayMs:1});
   let connectionId;
   try{

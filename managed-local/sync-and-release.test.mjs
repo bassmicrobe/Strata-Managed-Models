@@ -75,8 +75,8 @@ test('version checks avoid lexical ordering and reject malformed numbers', () =>
   assert.throws(() => compareVersions('0.2.13-rc1', '0.2.12'));
 });
 test('host packaging excludes installed dependencies and traversal/private configuration paths', () => {
-  for (const file of ['apps/host/server/index.mjs', 'apps/host/dist/assets/app.js', 'apps/host/src/components/ManagedChatModelPicker.tsx', 'apps/host/tests/managed-models-client.test.mjs', 'LICENSE']) assert.equal(bundlePath(file), true, file);
-  for (const file of ['../profile.json', 'apps/host/../../profile.json', 'apps\\host\\server\\index.mjs', 'apps/host/node_modules/package/index.js', 'apps/host/.env', 'apps/host/.npmrc', 'host-profile/data/model-providers.json', 'data/models/model.gguf', '/apps/host/server/index.mjs', 'apps/host//server/index.mjs']) assert.equal(bundlePath(file), false, file);
+  for (const file of ['app/host/server/index.mjs', 'app/host/dist/assets/app.js', 'app/host/src/components/ManagedChatModelPicker.tsx', 'app/host/tests/managed-models-client.test.mjs', 'LICENSE']) assert.equal(bundlePath(file), true, file);
+  for (const file of ['../profile.json', 'app/host/../../profile.json', 'app\\host\\server\\index.mjs', 'app/host/node_modules/package/index.js', 'app/host/.env', 'app/host/.npmrc', 'host-profile/data/model-providers.json', 'data/models/model.gguf', '/app/host/server/index.mjs', 'app/host//server/index.mjs']) assert.equal(bundlePath(file), false, file);
 });
 test('release manifest binds this fork feature to both exact source commits', () => {
   const manifest = bundleManifest({ version: '0.2.12', commit: 'a'.repeat(40), upstreamCommit: 'b'.repeat(40), upstreamTag: 'v0.2.12' });
@@ -86,16 +86,16 @@ test('release manifest binds this fork feature to both exact source commits', ()
 });
 test('Windows package contains the built UI, source and embedded identity; external identity hashes its actual bytes', { skip: process.platform !== 'win32' }, async t => {
   const root = mkdtempSync(join(tmpdir(), 'strata-release-test-'));
-  for (const path of ['apps/host/server', 'apps/host/dist/assets', 'apps/host/node_modules/fake']) mkdirSync(join(root, path), { recursive: true });
-  writeFileSync(join(root, 'apps/host/server/index.mjs'), '// source');
-  writeFileSync(join(root, 'apps/host/dist/index.html'), '<div id="root"></div>');
-  writeFileSync(join(root, 'apps/host/dist/assets/app.js'), '// built UI');
-  writeFileSync(join(root, 'apps/host/node_modules/fake/private.txt'), 'excluded');
+  for (const path of ['app/host/server', 'app/host/dist/assets', 'app/host/node_modules/fake']) mkdirSync(join(root, path), { recursive: true });
+  writeFileSync(join(root, 'app/host/server/index.mjs'), '// source');
+  writeFileSync(join(root, 'app/host/dist/index.html'), '<div id="root"></div>');
+  writeFileSync(join(root, 'app/host/dist/assets/app.js'), '// built UI');
+  writeFileSync(join(root, 'app/host/node_modules/fake/private.txt'), 'excluded');
   writeFileSync(join(root, 'LICENSE'), 'fixture licence');
   const previous = process.env.RUNNER_TEMP; process.env.RUNNER_TEMP = root;
   t.after(() => { if (previous === undefined) delete process.env.RUNNER_TEMP; else process.env.RUNNER_TEMP = previous; });
   const identity = bundleManifest({ version: '0.2.12', commit: 'a'.repeat(40), upstreamCommit: 'b'.repeat(40), upstreamTag: 'v0.2.12' });
-  const output = await packageHost(root, identity, 'LICENSE\0apps/host/server/index.mjs\0apps/host/node_modules/fake/private.txt\0');
+  const output = await packageHost(root, identity, 'LICENSE\0app/host/server/index.mjs\0app/host/node_modules/fake/private.txt\0');
   const external = JSON.parse(readFileSync(output.manifestFile, 'utf8')), zip = readFileSync(output.archive);
   assert.equal(external.archive.sha256, createHash('sha256').update(zip).digest('hex')); assert.equal(external.archive.size, zip.length);
   const inspect = join(root, 'inspect.ps1');
