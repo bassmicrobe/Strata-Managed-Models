@@ -248,13 +248,24 @@ class InstalledModelsNeedNoNetwork(unittest.TestCase):
                     'https://huggingface.co/nazeshinjite/Qwen3.8-Flash-Next-DFlash2-GGUF',   # the credit link in drafting.py's comment and drafting_fetch.py's docstring (nothing opens it)
                     'HF_DEFAULT = "https://huggingface.co"',
                     'base = (endpoint if endpoint is not None else (os.environ.get("HF_ENDPOINT") or "").strip().rstrip("/") or HF_DEFAULT)')
+        # These names describe an install-only tokenizer source, a model credit and a host
+        # classifier for requests made elsewhere. None of them makes a network request.
+        install_only = {
+            "strata_control/hy4_family.py": ('TOKENIZER_HF_BASE = "https://huggingface.co/tencent/Hy4-flash/resolve/main"',),
+            "strata_control/inkling_family.py": ("#: Unsloth Dynamic GGUF files hosted on huggingface.co/unsloth/Inkling-2-Mini-GGUF",),
+            "strata_control/transfer.py": (
+                '"""True when `hostname` is Hugging Face (huggingface.co / hf.co) or the configured HF_ENDPOINT host."""',
+                'if h == "huggingface.co" or h.endswith(".huggingface.co") or h == "hf.co" or h.endswith(".hf.co"):',
+                'ep = (env.get("HF_ENDPOINT") or "").strip()',
+            ),
+        }
         found = []
         for folder in ("strata_cli", "serve", "strata_control"):
             for p in (ROOT / folder).rglob("*.py"):
                 if "test" in p.name:
                     continue
                 text = p.read_text(encoding="utf-8", errors="replace")
-                for line in harmless:
+                for line in harmless + install_only.get(p.relative_to(ROOT).as_posix(), ()):
                     text = text.replace(line, "")
                 if hosts.search(text):
                     found.append(str(p.relative_to(ROOT)))
