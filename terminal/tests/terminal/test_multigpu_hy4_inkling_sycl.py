@@ -148,9 +148,18 @@ class Hy4FitMultiGpuTests(unittest.TestCase):
         self.assertEqual(single, single_zero)
 
         dual = hy4_fit.place("SQ-64", 16.0, 64.0, False, 131072, True, extra_vram_gib=16.0)
-        self.assertGreater(dual["vram_gb"], single["vram_gb"] + 14.0)
-        self.assertLess(dual["ram_gb"], single["ram_gb"])
+        # On 16 + 16 GiB at 128K the native planner reserves 1 GiB on the helper and
+        # another 2.378 GB for full KV, 1.15 GB for vision and 0.363 GB for peer graphs on the primary.
+        gain_gb = dual["vram_gb"] - single["vram_gb"]
+        self.assertAlmostEqual(gain_gb, 12.21, delta=0.02)
+        self.assertAlmostEqual(single["ram_gb"] - dual["ram_gb"], gain_gb, delta=0.02)
         self.assertEqual(dual["ssd_gb"], 0.0)
+        without_vision = hy4_fit.place("SQ-64", 16.0, 64.0, False, 131072, False, extra_vram_gib=16.0)
+        self.assertAlmostEqual(without_vision["vram_gb"] - dual["vram_gb"], 1.15, delta=0.02)
+
+        # Increasing the capacity of that same helper keeps both the context and the number of peers fixed.
+        larger_helper = hy4_fit.place("SQ-64", 16.0, 64.0, False, 131072, True, extra_vram_gib=24.0)
+        self.assertAlmostEqual(larger_helper["vram_gb"] - dual["vram_gb"], 8 * (1 << 30) / 1e9, delta=0.02)
 
         rec_single = hy4_fit.recommend(24.0, 64.0, False, 131072, True)
         rec_quad = hy4_fit.recommend(24.0, 64.0, False, 131072, True, extra_vram_gib=72.0)
