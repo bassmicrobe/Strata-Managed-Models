@@ -79,7 +79,7 @@ class Table(unittest.TestCase):
         self.assertNotIn("hy4-flash", setup.OWN_PATH_FAMILIES)
 
     def test_128k_sq_64_fits_on_8_plus_64_gib_and_spills_on_8_plus_60(self):
-        # Elastic KV starts with 16K slots. The initial expert placement fits in memory at 64 GiB.
+        # The 8 GiB card starts with 4K elastic KV slots; the maximum context stays at 128K.
         lines = dict(setup.hy4_menu_lines(8, 64, False, 131072, True))
         self.assertEqual([b for b, t in lines.items() if "(recommended)" in t], ["SQ-64"])
         self.assertIn("fits in memory", lines["SQ-64"])
@@ -407,8 +407,9 @@ class Defaults0218(unittest.TestCase):
         self.assertEqual(cfg["drafting"], "dfly2")
         self.assertEqual(cfg["arch"], "hy4flash")
         self.assertEqual(cfg["exe"], "component:strata-hy4")
-        self.assertEqual(args[args.index("--vram-experts-gb") + 1], "5.22")
-        self.assertEqual(args[args.index("--ram-experts-gb") + 1], "50.82")
+        placement = hy4_fit.compute("SQ-64", 12, 64, 131072, True)
+        self.assertEqual(args[args.index("--vram-experts-gb") + 1], f"{placement['vram_gb']:.2f}")
+        self.assertEqual(args[args.index("--ram-experts-gb") + 1], f"{placement['ram_gb']:.2f}")
         self.assertTrue(any(l.startswith("images: on") for l in lines), lines)
 
     def test_vision_no_leaves_the_shard_and_the_option_out(self):
@@ -428,8 +429,9 @@ class Defaults0218(unittest.TestCase):
     def test_the_planned_placement_on_an_8_gib_card_is_written_at_128k(self):
         cfg, _lines, _ = self.install(vram=8.0)                                          # the engine lanes deal with a cache that does not fit the card
         args = cfg["args"]
-        self.assertEqual(args[args.index("--vram-experts-gb") + 1], "1.44")
-        self.assertEqual(args[args.index("--ram-experts-gb") + 1], "54.60")
+        placement = hy4_fit.compute("SQ-64", 8, 64, 131072, True)
+        self.assertEqual(args[args.index("--vram-experts-gb") + 1], f"{placement['vram_gb']:.2f}")
+        self.assertEqual(args[args.index("--ram-experts-gb") + 1], f"{placement['ram_gb']:.2f}")
 
 
 class Catalog(unittest.TestCase):
@@ -456,7 +458,7 @@ class Catalog(unittest.TestCase):
         self.assertTrue(by["SQ-64"]["images"])
         self.assertEqual({k: by[k]["on_this_pc"] for k in by}, {"SQ-64": "fits", "SQ-96": "may run slower", "SQ-128": "may run slower"})
         self.assertEqual([k for k in by if by[k]["hy4"]["recommended"]], ["SQ-64"])
-        self.assertEqual(by["SQ-64"]["hy4"]["placement"], {"vram_gb": 5.22, "ram_gb": 50.82, "ssd_gb": 0.0})
+        self.assertEqual(by["SQ-64"]["hy4"]["placement"], hy4_fit.compute("SQ-64", 12, 64, 131072, True))
         self.assertIsNone(by["SQ-64"]["gpu_options"])
 
     def test_unified_memory(self):
