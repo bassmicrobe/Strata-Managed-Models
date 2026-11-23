@@ -11,7 +11,8 @@ import serve.server as server
 
 
 def handler(raise_this, answer_started=False):
-    svc = SimpleNamespace(begin_request=lambda path, req: None, drop_embeddings=lambda: None, reserve_inference=lambda: True, release_inference=lambda: None)
+    svc = SimpleNamespace(check_model=lambda req: None, begin_request=lambda path, req: None,
+                          drop_embeddings=lambda: None, reserve_inference=lambda: True, release_inference=lambda: None)
     H = server.make_handler(svc)
     h = H.__new__(H)
     h.path = "/v1/chat/completions"
