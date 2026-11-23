@@ -580,6 +580,7 @@ class Strata:
         self.src = Path(src).resolve() if src else self.root
         self.state_dir = self.root / STATE_DIR
         self.lock = threading.Lock()                    # install / start / stop one at a time
+        self.install_cancel_generation = 0
         self.children: list[subprocess.Popen] = []      # reaped now and then (no zombies on POSIX)
         self._setup = None
         self._setup_tried = False
@@ -2503,14 +2504,13 @@ class Tools:
                        backend=None, low_ram=None, port=None, data_dir=None, confirm=False, cancel=False,
                        gguf_dir=None, drafter=None, mtp=None) -> dict:
         s = self.s
-        asked = time.monotonic()                         # when this call came in (before it waits for the lock)
+        generation = s.install_cancel_generation         # capture before waiting for the install lock
         with s.lock:
             job = s.install_job()
             if cancel:
+                # Invalidate starts already waiting, even on clocks that give sequential calls the same timestamp.
+                s.install_cancel_generation += 1
                 if not job or not job["running"]:
-                    # A start that came in before this cancel and is still waiting for the lock must not launch the job after it
-                    # (the app quit while "Prepare and load" was starting: the job and its packer then ran on with nobody to stop them).
-                    s.install_cancelled_at = time.monotonic()
                     return {"summary": "no install is running", "install": job}
                 j = s.state("install")
                 res = s.state("install-result")
@@ -2536,7 +2536,7 @@ class Tools:
                                       if job.get("download") else ""),
                         "install": job, "follow": "call strata_install again for progress, or strata_logs "
                                                   "source=setup for the full output"}
-            if confirm and getattr(s, "install_cancelled_at", 0) >= asked:
+            if confirm and generation != s.install_cancel_generation:
                 raise ToolError("the install was cancelled before it started")
             given = [x for x in (family, model, context, vision, kv, gpu, gpus, backend, low_ram, port, data_dir)
                      if x is not None]

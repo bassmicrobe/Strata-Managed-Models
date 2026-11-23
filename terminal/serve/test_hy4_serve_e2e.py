@@ -55,6 +55,8 @@ def clean_env(extra: dict | None = None) -> dict:
 
 
 class Hy4Serve(unittest.TestCase):
+    model_id = "hy4-flash-sq-64"
+
     @classmethod
     def setUpClass(cls):
         cls.tmp = tempfile.TemporaryDirectory()
@@ -89,7 +91,7 @@ class Hy4Serve(unittest.TestCase):
         with socket.socket() as s:
             s.bind(("127.0.0.1", 0))
             cls.port = s.getsockname()[1]
-        cfg = {"exe": str(exe), "arch": "hy4flash", "model_name": "hy4-flash-sq-64", "tokenizer": str(tokdir), "cwd": str(d), "log": str(d / "engine.log"), "port": cls.port,
+        cfg = {"exe": str(exe), "arch": "hy4flash", "model_name": cls.model_id, "tokenizer": str(tokdir), "cwd": str(d), "log": str(d / "engine.log"), "port": cls.port,
                "args": ["--native", str(model), "--engram", str(d / "e.strata"), "--vision", str(d / "v.strata"), "--max-context", "8192", "--script", str(cls.script), "--record", str(cls.record)]}
         cls.cfg_path = d / "strata-hy4-flash-sq-64.json"
         cls.cfg_path.write_text(json.dumps(cfg), encoding="utf-8")
@@ -225,7 +227,7 @@ class Hy4Serve(unittest.TestCase):
 
     def test_the_anthropic_route_and_streaming(self):
         self.start([self.ids_of("plan</think:opensource>Streamed answer." + END)])
-        status, data = self.call("/v1/messages", {"model": "hy4-flash", "max_tokens": 100, "stream": True, "messages": [{"role": "user", "content": "hi"}]},
+        status, data = self.call("/v1/messages", {"model": self.model_id, "max_tokens": 100, "stream": True, "messages": [{"role": "user", "content": "hi"}]},
                                  {"anthropic-version": "2023-06-01"})
         self.assertEqual(status, 200, data)
         self.assertIn("event: message_start", data)

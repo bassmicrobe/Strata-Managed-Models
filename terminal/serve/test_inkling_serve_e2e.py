@@ -24,10 +24,13 @@ import urllib.request
 import zlib
 from pathlib import Path
 
+import psutil
+
 TERMINAL = Path(__file__).resolve().parents[1]
 if str(TERMINAL) not in sys.path:
     sys.path.insert(0, str(TERMINAL))
 
+from strata_cli.bench_standard import stop_engine
 from tools import inkling_tokenizer, strata_tokenizer
 
 
@@ -203,6 +206,7 @@ class _MockServerHarness:
             [sys.executable, str(TERMINAL / "serve" / "server.py"), "--engine", "strata", "--config", str(self.cfg_path),
              "--host", "127.0.0.1", "--port", str(self.port), "--no-api-key"],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env,
+            start_new_session=os.name != "nt",
         )
         deadline = time.time() + 20.0
         while time.time() < deadline:
@@ -212,18 +216,24 @@ class _MockServerHarness:
                         return self
             except Exception:
                 if self.proc.poll() is not None:
-                    out = self.proc.stdout.read() if self.proc.stdout else ""
+                    out, _ = self.proc.communicate()
                     raise RuntimeError(f"server exited early ({self.proc.returncode}):\n{out}")
                 time.sleep(0.1)
+        self.__exit__(None, None, None)
         raise RuntimeError("server did not become healthy in time")
 
-    def __exit__(self, *_exc):
-        if self.proc is not None and self.proc.poll() is None:
-            self.proc.terminate()
-            try:
-                self.proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self.proc.kill()
+    def __exit__(self, exc_type, _exc, _tb):
+        if self.proc is not None:
+            # Stop the server and its mock child, which still holds the record file on Windows.
+            with self.proc.stdout:
+                try:
+                    children = psutil.Process(self.proc.pid).children(recursive=True)
+                except psutil.NoSuchProcess:
+                    children = []
+                problem = stop_engine(self.proc)
+                _, alive = psutil.wait_procs(children, timeout=5)
+            if (problem or alive) and exc_type is None:
+                raise RuntimeError(problem or "the mock engine did not stop")
 
 
 class TestInklingServeE2E(unittest.TestCase):

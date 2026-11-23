@@ -67,6 +67,7 @@ only place a difference is allowed, and each entry has its reason.  Today:
 | `log` | app vs launch | the app's install folder, the Terminal's launch folder |
 | `engine_ready_s` | app vs launch | the app's wait for the engine; the Terminal derives its own |
 | `args_derived`, `args_written` | launch only | launch's bookkeeping copies of `args` |
+| `--prompt-cache-spread` | packaged app only | the app spreads checkpoints across long Flash-Next chats by default. Terminal users opt in. |
 | `drafting: auto` | Models-screen Load only (intended) | that Load saves the person's Drafting choice |
 
 **Request slots.**  On NVIDIA 72 GB the plain Load used to write `parallel: 3` and start `--batch 3 --batch-mtp`; that was only because it ran the MTP (no drafter had been fetched).

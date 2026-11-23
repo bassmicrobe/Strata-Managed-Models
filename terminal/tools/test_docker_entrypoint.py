@@ -276,7 +276,7 @@ class Entrypoint(unittest.TestCase):
         (empty / "IQ3_XXS").mkdir(parents=True)
         r = subprocess.run([SH, str(self.script)], env=self.env(MODEL="IQ3_XXS", MODEL_PATH=str(empty)), capture_output=True, text=True, timeout=30)
         self.assertEqual(r.returncode, 2)
-        self.assertIn("holds no .gguf files", r.stderr)
+        self.assertIn("holds no .gguf or .strata files", r.stderr)
         (empty / "IQ3_XXS" / "a-00001-of-00002.gguf").write_text("x")
         r = subprocess.run([SH, str(self.script)], env=self.env(MODEL="IQ3_XXS", MODEL_PATH=str(empty)), capture_output=True, text=True, timeout=30)
         self.assertEqual(r.returncode, 2)
@@ -285,7 +285,7 @@ class Entrypoint(unittest.TestCase):
 
     def test_own_files_without_a_model_name_do_not_say_recommended_model(self):
         (self.tmp / "g").mkdir()
-        (self.tmp / "g" / "m-00001-of-00001.gguf").write_text("x")
+        (self.tmp / "g" / "Hy4-Flash-SQ-64.strata").write_text("x")
         p = self.start(MODEL_PATH=str(self.tmp / "g"))
         self.wait_for("--show-key")
         code, out, err = self.stop(p)

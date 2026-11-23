@@ -20,6 +20,10 @@ BY_DESIGN = {
 ENV_BY_DESIGN = {
 }
 
+# The packaged app enables this switch by default on the Flash-Next models in the
+# matrix. Terminal users opt in. Check the switch once in each app argument list.
+PACKAGED_APP_SPREAD = "--prompt-cache-spread"
+
 #: Intended differences of the Models-screen Load alone.
 MODELS_SCREEN = {
     "drafting": "the Models screen's Load saves the person's Drafting choice ('auto' unless they changed it) into the model's settings; launch and the plain Load save none",
