@@ -38,13 +38,20 @@ class EntryPointsAgree(unittest.TestCase):
         for path in sorted(GOLDEN.glob("*/*.json")):
             yield path.parent.name + "/" + path.stem, json.loads(path.read_text(encoding="utf-8"))["entries"]
 
+    def check_args(self, launch, app, label):
+        spread = allowlist.PACKAGED_APP_SPREAD
+        self.assertNotIn(spread, launch, label)
+        self.assertEqual(app.count(spread), 1, label)
+        self.assertEqual(launch, [arg for arg in app if arg != spread], label)
+
     def check(self, other: str, allowed: set[str]):
         seen = 0
         for cell, entries in self.cells():
             with self.subTest(cell=cell, entry=other):
                 want, got = comparable(entries["launch"], allowed), comparable(entries[other], allowed)
-                self.assertEqual(want["argv"], got["argv"], f"{cell}: engine arguments")
+                self.check_args(want["argv"], got["argv"], f"{cell}: engine arguments")
                 self.assertEqual(want["env"], got["env"], f"{cell}: engine environment")
+                self.check_args(want["config"].pop("/args"), got["config"].pop("/args"), f"{cell}: saved arguments")
                 self.assertEqual(want["config"], got["config"], f"{cell}: run config")
                 self.assertEqual(want["fetches"], got["fetches"], f"{cell}: the drafter downloads asked for")
             seen += 1

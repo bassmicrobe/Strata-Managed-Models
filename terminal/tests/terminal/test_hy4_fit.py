@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import unittest
 from pathlib import Path
 
@@ -78,7 +79,7 @@ class Recommendation(unittest.TestCase):
             self.assertFalse(got["fits"])
             self.assertGreater(got["placement"]["ssd_gb"], 5.0)
             self.assertEqual(got["mode"], "cross_tier_ssd")
-        self.assertAlmostEqual(F.recommend(12, 32, False, 131072, True)["placement"]["ssd_gb"], 23.39, delta=0.05)
+        self.assertAlmostEqual(F.recommend(12, 32, False, 131072, True)["placement"]["ssd_gb"], 24.29 if os.name == "nt" else 23.72, delta=0.05)
 
     def test_no_card(self):
         got = F.recommend(None, 64)
@@ -134,13 +135,14 @@ class Defaults0218(unittest.TestCase):
         # the resident cases stay resident (RAM takes what the card gives up, and the engine keeps the KV state in pinned host memory on a small card) ...
         for model, vram, ram in (('SQ-64', 12, 64), ('SQ-96', 12, 96), ('SQ-128', 12, 128), ('SQ-96', 8, 96)):
             self.assertEqual(F.compute(model, vram, ram, 131072, True)['ssd_gb'], 0.0, (model, vram, ram))
-        # ... and the ones that read from the SSD read more at 128K (26.50 GB on 12 GiB + 32 GiB with Vt-free MLA and 0.03 GB wkv scratch)
+        # The 32 GiB class streams part of SQ-64. Windows reserves additional VRAM for WDDM.
         # (the author's SQ-32 rows of the 32 GiB class are not offered any more; there SQ-64 is recommended and reads from the SSD, see test_the_32_gib_class_gets_sq_64_with_its_ssd_read_figure)
-        self.assertAlmostEqual(F.compute('SQ-64', 12, 32, 131072, True)['ssd_gb'], 23.39, delta=0.05)
+        self.assertAlmostEqual(F.compute('SQ-64', 12, 32, 131072, True)['ssd_gb'], 24.29 if os.name == "nt" else 23.72, delta=0.05)
 
     def test_the_home_pc_12_gib_card_and_64_gib_of_ram_at_128k(self):
         r = F.compute("SQ-64", 12, 64, 131072, True)
-        self.assertEqual((r["vram_gb"], r["ram_gb"], r["ssd_gb"]), (5.22, 50.82, 0.0))      # 12 GiB at 128K with 16K growable FP16 slabs + host embed_tokens + single-layer wkv + 2x160MiB scratch: 5.22 GB of adaptive vcache experts in VRAM, all resident with 64 GiB
+        expected = (4.32, 51.72, 0.0) if os.name == "nt" else (4.89, 51.15, 0.0)
+        self.assertEqual((r["vram_gb"], r["ram_gb"], r["ssd_gb"]), expected)
         self.assertEqual(F.recommend(12, 64, False, 131072, True)["build"], "SQ-64")
 
     def test_the_images_cost_the_ram_only(self):
@@ -155,39 +157,38 @@ class Defaults0218(unittest.TestCase):
 
     def test_an_8_gib_card_is_planned_at_128k_like_every_other(self):
         # owner, 2026-11-19: 128K is the default on every card and people change it themselves: no smaller context is recommended and nothing warns.
-        # With 16K growable FP16 KV slabs (up to ~94K in VRAM before host spill), host-mapped embed_tokens (-0.38 GB), single-layer wkv scratch (0.03 GB),
-        # and chunk=1024, an 8 GiB card keeps 1.44 GB of adaptive vcache experts at 128K and fits SQ-64 100% resident with 64 GiB RAM (0 GB SSD spill)!
+        # The initial 4K allocation can grow within the requested context; pinned memory holds later KV rows.
         self.assertFalse(hasattr(F, "recommend_context"))
         self.assertFalse(hasattr(F, "context_fits"))
         self.assertTrue(F.kv_in_host(8, 131072))
         self.assertAlmostEqual(F.host_kv_gb(131072, 8.0), 3.04, delta=0.05)
         r = F.compute("SQ-64", 8, 64, 131072, True)
         self.assertEqual(F.mode(r["ssd_gb"]), "ram_vram_zero_ssd")
-        self.assertEqual(r["ssd_gb"], 0.0)
+        self.assertEqual(r["ssd_gb"], 0.05 if os.name == "nt" else 0.0)
         self.assertTrue(F.fits("SQ-64", 8, 64, False, 131072, True))
         best = F.recommend(8, 64, False, 131072, True)
         self.assertEqual(best["build"], "SQ-64")
         self.assertTrue(best["fits"])
         self.assertEqual(best["mode"], "ram_vram_zero_ssd")
-        self.assertEqual(best["placement"], {"vram_gb": 1.44, "ram_gb": 54.6, "ssd_gb": 0.0})
+        expected = (1.05, 54.95, 0.05) if os.name == "nt" else (1.34, 54.70, 0.0)
+        self.assertEqual(tuple(best["placement"][k] for k in ("vram_gb", "ram_gb", "ssd_gb")), expected)
         self.assertFalse(F.kv_in_host(48, 131072))
         self.assertGreater(F.compute("SQ-64", 8, 64, 20480, True)["vram_gb"], 0.0)
         self.assertFalse(F.kv_in_host(8, 20480))
 
     def test_the_engine_plan_mirrors_plan_memory(self):
-        # HY4-CUDA's plan_memory (hy4_gpu_model.hip.h) at 128K:
-        # 8 GiB: chunk=1024, 16K growable FP16 KV (dev_pos=94K before host spill), optional kv_q8=True fits full 128K in VRAM (0 host spill);
-        # 10-12 GiB: chunk=1024/2048, 16K growable FP16 KV, 0 host KV spill, ~5.2 GB vcache room on 12 GiB;
-        # 16-24 GiB: chunk=4096, FP16 MLA KV, 16K growable KV slabs, compact d_scratch reserved.
+        # CUDA defaults with the drafter on and all VRAM available. WDDM reserves more free space.
         p8, p10, p12, p16, p24 = (F.engine_plan(v, 131072) for v in (8, 10, 12, 16, 24))
-        self.assertEqual((p8["mask"], p8["chunk"], p8["kv_q8"], p8["init_slots"]), (0, 1024, False, 16384))
-        self.assertGreaterEqual(p8["dev_pos"], 90000)
+        self.assertEqual((p8["mask"], p8["chunk"], p8["kv_q8"], p8["init_slots"]), (0, 1024, False, 4096))
+        self.assertEqual(p8["dev_pos"], 64512 if os.name == "nt" else 78848)
         p8_q8 = F.engine_plan(8, 131072, kv_q8=True)
-        self.assertEqual((p8_q8["mask"], p8_q8["dev_pos"], p8_q8["kv_q8"], p8_q8["host_need_gb"]), (0, 0, True, 0.0))
-        self.assertEqual((p10["mask"], p10["chunk"], p10["kv_q8"], p10["init_slots"]), (0, 1024, False, 16384))
-        self.assertEqual((p12["mask"], p12["chunk"], p12["kv_q8"], p12["init_slots"]), (0, 2048, False, 16384))
-        self.assertEqual((p16["mask"], p16["chunk"], p16["kv_q8"], p16["host_need_gb"]), (0, 4096, False, 0.0))
+        self.assertEqual((p8_q8["mask"], p8_q8["dev_pos"], p8_q8["kv_q8"]), (0, 92160 if os.name == "nt" else 112640, True))
+        self.assertLess(p8_q8["host_need_gb"], p8["host_need_gb"])
+        self.assertEqual((p10["mask"], p10["chunk"], p10["kv_q8"], p10["init_slots"]), (0, 1024, False, 8192))
+        self.assertEqual((p12["mask"], p12["chunk"], p12["kv_q8"], p12["init_slots"]), (0, 2048, False, 8192))
+        self.assertEqual((p16["mask"], p16["chunk"], p16["init_slots"], p16["host_need_gb"]), (0, 2048, 16384, 0.0))
         self.assertEqual((p24["mask"], p24["chunk"], p24["kv_q8"]), (0, 4096, False))
+        self.assertEqual(F.engine_plan(12, 131072, multi_gpu=True)["init_slots"], 131072)
         self.assertGreater(p24["reserve_gb"], p16["reserve_gb"])              # 2x384 MiB vs 2x256 MiB prefill scratch
         self.assertFalse(F.kv_in_host(16, 131072))
         self.assertFalse(F.kv_in_host(12, 131072))

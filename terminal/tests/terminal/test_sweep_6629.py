@@ -25,8 +25,10 @@ class PrunedComponentPathTests(unittest.TestCase):
         # Active engine folder has a different version AND variant suffix than the pruned legacy folder
         eng_dir = comp_root / "engine" / "0.1.65-windows-x86_64-cuda-cuda13"
         eng_dir.mkdir(parents=True)
-        (eng_dir / "strata.exe").write_bytes(b"MZ" + b"\x00" * 64)
-        (eng_dir / "strata-vision.exe").write_bytes(b"MZ" + b"\x00" * 64)
+        for name in ("strata.exe", "strata-vision.exe"):
+            exe = eng_dir / name
+            exe.write_bytes(b"MZ" + b"\x00" * 64)
+            exe.chmod(0o755)
         (eng_dir / "BUILD.json").write_text(json.dumps({"version": "0.1.65"}), encoding="utf-8")
         (comp_root / "engine" / "active.json").write_text(
             json.dumps({"version": "0.1.65-windows-x86_64-cuda-cuda13"}), encoding="utf-8"

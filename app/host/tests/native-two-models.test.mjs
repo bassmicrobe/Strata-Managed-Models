@@ -35,7 +35,11 @@ test('usedBy is declared before the card choice that calls it (a const used earl
 
 test('a model that failed to start is not offered in the chat model picker', async () => {
   const picker = await readFile(new URL('../src/components/ChatModelPicker.tsx', import.meta.url), 'utf8');
-  assert.equal((picker.match(/native\?\.instances\.filter\(i => i\.status !== 'error'\)\.map/g) ?? []).length, 2);
+  const [native, legacy] = picker.split('function LegacyChatModelPicker()');
+  // The native picker renders the filtered model list, including saved models available for retry.
+  assert.match(native, /const rows = nativePickerModels\(native\?\.installed\?\.models, native\?\.instances\)/);
+  assert.match(native, /rows\.map\(model => <button/);
+  assert.match(legacy, /native\?\.instances\.filter\(i => i\.status !== 'error'\)\.map\(i => <button/);
 });
 
 import { friendlyModelName } from '../server/model-names.mjs';

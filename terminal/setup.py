@@ -11151,6 +11151,11 @@ def mac_inkling_setup(a) -> int:
 
 
 def main() -> int:
+    if sys.version_info < (3, 11):
+        print("Source setup requires Python 3.11 or newer for fixed Pillow 13.0.0. "
+              "Install a supported Python, move the old .venv aside, and rerun setup. "
+              "Keep your model files and settings; see docs/SOURCE_INSTALL.md.", file=sys.stderr)
+        return 1
     try:                                               # the engine programs setup runs start no debugger on a user's machine (strata_control/childenv.py)
         from strata_control.childenv import quiet_crash_env
         quiet_crash_env()

@@ -61,8 +61,10 @@ class Plan(unittest.TestCase):
         plan = setup.unsloth_small_card_plan(8.0, 32768, "int8", 300, ctx_fixed=True, kv_fixed=True)
         self.assertEqual(plan[:2], (32768, "int8"))
 
-    def test_a_6gb_card_has_no_plan(self):
-        self.assertIsNone(setup.unsloth_small_card_plan(6.0, 8192, "int8", None))
+    def test_4_and_6_gb_use_dense_streaming_and_smaller_cards_have_no_plan(self):
+        self.assertEqual(setup.unsloth_small_card_plan(6.0, 8192, "int8", None), (8192, "int8", False, 0.0))
+        self.assertEqual(setup.unsloth_small_card_plan(4.0, 8192, "int8", None), (4608, "q4_0", False, 0.0))
+        self.assertIsNone(setup.unsloth_small_card_plan(3.0, 8192, "int8", None))
 
     def test_a_reserve_the_user_gave_is_counted(self):
         a = setup.unsloth_small_card_plan(8.0, 8192, "int8", 0)
@@ -77,9 +79,11 @@ class Words(unittest.TestCase):
         self.assertIn("very slow", text)
         self.assertIn("IQ3_XXS or IQ3_S", text)
 
-    def test_no_plan_says_the_start_will_probably_stop(self):
-        lines = setup.unsloth_small_card_lines("UD-Q4_K_XL", 6.0, None, False)
-        self.assertTrue(any("will probably" in x for x in lines))
+    def test_6_gb_explains_where_streamed_experts_live(self):
+        plan = setup.unsloth_small_card_plan(6.0, 8192, "int8", None)
+        text = " ".join(setup.unsloth_small_card_lines("UD-Q4_K_XL", 6.0, plan, False))
+        self.assertIn("0-slot / dense-streaming", text)
+        self.assertIn("routed experts stream from RAM + SSD", text)
 
 
 class Main8GB(Base):

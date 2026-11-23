@@ -10,7 +10,7 @@ on:
     paths:
       - .github/workflows/check.yml
       - tools/check
-      - requirements*.txt
+      - terminal/requirements*.txt
       - engine/CMakeLists.txt
       - engine/CMakePresets.json
       - engine/cmake/**
@@ -18,7 +18,7 @@ on:
       - engine/include/**
       - engine/bench/micro/**
       - engine/third_party/**
-      - tests/**
+      - terminal/tests/**
       - terminal/serve/**
       - terminal/strata.py
       - terminal/setup.py
@@ -35,7 +35,7 @@ on:
     paths:
       - .github/workflows/check.yml
       - tools/check
-      - requirements*.txt
+      - terminal/requirements*.txt
       - engine/CMakeLists.txt
       - engine/CMakePresets.json
       - engine/cmake/**
@@ -43,7 +43,7 @@ on:
       - engine/include/**
       - engine/bench/micro/**
       - engine/third_party/**
-      - tests/**
+      - terminal/tests/**
       - terminal/serve/**
       - terminal/strata.py
       - terminal/setup.py
@@ -87,7 +87,7 @@ jobs:
         with:
           python-version: '3.12'
           cache: pip
-          cache-dependency-path: requirements*.txt
+          cache-dependency-path: terminal/requirements*.txt
       - uses: actions/setup-node@v4
         if: ${{ startsWith(matrix.only, 'host') }}
         with:
@@ -129,7 +129,7 @@ jobs:
         with:
           python-version: '3.12'
           cache: pip
-          cache-dependency-path: requirements*.txt
+          cache-dependency-path: terminal/requirements*.txt
       - uses: actions/setup-node@v4
         if: ${{ startsWith(matrix.only, 'host') }}
         with:
@@ -189,7 +189,7 @@ jobs:
         with:
           python-version: '3.12'
           cache: pip
-          cache-dependency-path: requirements*.txt
+          cache-dependency-path: terminal/requirements*.txt
       - uses: actions/setup-node@v4
         if: ${{ startsWith(matrix.only, 'host') }}
         with:

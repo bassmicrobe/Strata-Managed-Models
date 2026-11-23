@@ -21,11 +21,9 @@ tests/terminal/test_hy4_squant_fit.py, plus what the 0.2.18 defaults add (owner,
 
 The placement is planned at the chosen context on every card, 8 GB ones included (owner, 2026-11-19: 128K is the default everywhere and people change it themselves, never a
 lower context chosen for them).  At the author's 20K the author's rule above holds.  Beyond it the engine's own memory plan decides (HY4-CUDA's plan_memory in
-hy4_gpu_model.hip.h, mirrored by `engine_plan`, with Vt-free MLA of 71576cda5 and the 0.03 GB single-layer wkv scratch of 6e38f588a): discrete cards under 48 GiB map
-embed_tokens (0.38 GB) in host RAM, and keep the working buffers and the KV state free of experts; an 8 GiB card that cannot hold all 128K KV rows + IndexPool (2.72 GB) keeps
-the first ~94K positions in video memory and moves the state to pinned host memory once a prompt passes them (3.02 GB in host RAM plus HOST_PIN_HEADROOM_GB), so SQ-64 reads
-about 1.44 GB from the SSD on 8 GiB + 64 GiB ("near resident").  A 12 GiB card and larger hold all 128K Vt-free KV rows + IndexPool in video memory (2.50 GB of experts in
-VRAM on 12 GiB, SQ-64 + 64 GiB resident; 12 GiB + 32 GiB reads 26.5 GB) and reserve the prefill streaming scratch.
+hy4_gpu_model.hip.h). The setup estimate assumes an idle card and the default CUDA drafter. Single discrete cards below 48 GiB allocate the initial KV slab by card size
+and grow it as needed. The placement leaves room for the workspace, drafter buffers, KV state and the platform's free-VRAM floor. An 8 GiB card spills part of a full
+128K FP16 cache into pinned host memory. The loader adjusts placement to the free memory it finds at runtime.
 
 Unified memory (Strata Halo, Apple silicon, DGX Spark) has one pool: the trunk, the KV and every expert body live in it and nothing is copied or read from the SSD while the
 footprint fits `pool - UMA_RESERVE_GB - kv_extra - vision`.
@@ -59,7 +57,8 @@ ENGINE_KV_ROW_Q8_B = 12.0 * 656.0        # per position: the 12 sparse layers' Q
 ENGINE_IDX_B = 12.0 * 512.0 + 12.0 * 64.0  # per position: IndexPool iv/ig + the pooled keys (bytes; the pooled keys are max_ctx/4 x 256 B, i.e. 64 B a position)
 ENGINE_KVB_GB = 0.03                     # single-layer reusable FP16 wk/wv prefill scratch (28 MiB; decode reads quantized kv_b directly)
 ENGINE_WKV_GB = ENGINE_KVB_GB
-ENGINE_CUBLAS_GB = 0.08                  # 64 MiB reusable side-stream FP16 dequant + cuBLAS scratch
+ENGINE_CUBLAS_GB = 0.12                  # CUDA side-stream dequant workspace and handles
+ENGINE_DRAFT_BUFFERS_GB = 0.28           # DFly2 runtime buffers, separate from its weights in the trunk
 ENGINE_EMBED_HOST_GB = 0.38              # embed_tokens pinned in host RAM on discrete cards < 48 GiB
 ENGINE_HOST_EMBED_GB = ENGINE_EMBED_HOST_GB
 ENGINE_MARGIN_GB = 0.32
@@ -142,10 +141,11 @@ def non_expert_gb(ctx: int | None = None) -> float:
     return VRAM_NON_EXPERT_GB + kv_extra_gb(ctx)
 
 
-def engine_plan(vram_gib: float, ctx: int | None = None, dense_gb: float = 5.80, kv_q8: bool = False) -> dict:
-    """HY4-CUDA's memory plan for a context on a card (plan_memory in engine/src/hy4flash/run/hy4_gpu_model.hip.h), mirrored:
+def engine_plan(vram_gib: float, ctx: int | None = None, dense_gb: float = 5.80, kv_q8: bool = False, *,
+                multi_gpu: bool = False, vision: bool = False) -> dict:
+    """Estimate the initial placement for setup using the default CUDA engine with the drafter enabled.
     - Discrete cards (< 48 GiB) keep embed_tokens (0.38 GB) in pinned mapped host memory and use single-layer reusable wk/wv scratch (0.03 GB).
-    - Single discrete cards (< 48 GiB) with ctx > 16384 start with 16K KV+IndexPool slots and grow incrementally by reclaiming adaptive vcache slabs.
+    - Single discrete cards below 48 GiB grow their KV+IndexPool from 4K, 8K or 16K slots; multi-GPU reserves the full context.
     - Optional compressed Q8 MLA KV (`kv_q8=True`, 656 B/slot vs 1152 B/slot FP16, lossless FP16 RoPE) is available via `--kv q8` / `HY4_KV_Q8=1`.
     Returns {chunk, work_gb, mask, dev_pos, trunk_gb, reserve_gb, host_need_gb, kv_q8, init_slots, host_embed}."""
     n = DEFAULT_CONTEXT if ctx is None else int(ctx)
@@ -156,40 +156,56 @@ def engine_plan(vram_gib: float, ctx: int | None = None, dense_gb: float = 5.80,
     kv_q8 = bool(kv_q8)
     kv_row_b = 656.0 if kv_q8 else 1152.0
     per_pos = 12.0 * kv_row_b + ENGINE_IDX_B
-    init_slots = 16384 if (v < 48.0 and n > 16384) else n
+    init_slots = n if multi_gpu else elastic_kv_init_slots(v, n)
     kv_init_gb = ((init_slots + 8 + 15) // 16 * 16) * per_pos / 1e9
     wkv = ENGINE_KVB_GB
-    cublas_gb = 0.08
+    runtime_gb = ENGINE_CUBLAS_GB + ENGINE_DRAFT_BUFFERS_GB
+    floor = wddm_vram_floor_gb(v)
 
     def est_work_gb(c: int) -> float:
         arena = max(2.0 * c * 16384.0 * 4.0, float(c) * 16.0 * 1536.0 * 6.0) / 1e9
         return arena + c * 0.195e6 / 1e9 + 0.22 + 30.0 * (512.0 + c) * kv_row_b / 1e9
 
-    chunk = (8192 if n >= 8192 else 4096) if tot >= 44.0 else (4096 if tot >= 15.0 else (2048 if tot >= 11.5 else 1024))
-    work_cap = 0.22 if tot >= 15.0 else 0.16
+    if multi_gpu and n >= 98304 and tot < 40.0:
+        chunk = 2048
+    elif tot >= 44.0:
+        chunk = 8192 if n >= 8192 else 4096
+    elif tot >= 20.0:
+        chunk = 4096
+    elif tot >= 11.5:
+        chunk = 2048
+    else:
+        chunk = 1024 if tot >= 7.0 else 512
+    work_cap = 0.22 if tot >= 15.0 else (0.16 if tot >= 7.0 else 0.14)
     while chunk > 256 and est_work_gb(chunk) > work_cap * tot:
         chunk //= 2
-    while chunk > 256 and trunk + est_work_gb(chunk) + kv_init_gb + wkv + cublas_gb + 0.55 > tot:
+    while chunk > 256 and trunk + est_work_gb(chunk) + kv_init_gb + wkv + runtime_gb + floor > tot:
         chunk //= 2
 
     work = est_work_gb(chunk)
     slots = (n + 8 + 15) // 16 * 16
     rows = 12.0 * slots * kv_row_b / 1e9
     pivg = (12.0 * n * 512.0 + 12.0 * (n // 4 + 8) * 256.0) / 1e9
-    mask = 1 if (trunk + work + pivg + rows + wkv + cublas_gb + 0.35 > tot) else 0
+    trunk_in_vram = 0.0 if tot < trunk + floor + 0.50 else trunk
+    mask = 1 if (trunk_in_vram + work + pivg + rows + wkv + runtime_gb + floor > tot) else 0
     dev_pos = 0
     if mask & 1:
-        avail = tot - trunk - work - wkv - cublas_gb - 0.35
+        avail = tot - trunk_in_vram - work - wkv - runtime_gb - floor
         dp = int(avail * 1e9 / per_pos) // 1024 * 1024 if avail > 0 else 0
-        if 4096 <= dp < n:
+        if 4096 <= dp < n and trunk_in_vram > 0.0:
             mask &= ~1
             dev_pos = dp
     host_kv = (rows + (pivg if dev_pos else 0.0)) if ((mask & 1) or dev_pos) else 0.0
     host_need = (host_kv + ENGINE_MARGIN_GB) if host_kv > 0.0 else 0.0
     kv_res = 0.0 if (mask & 1) else (kv_init_gb if init_slots < n else (dev_pos * per_pos / 1e9 if dev_pos else (rows + pivg)))
     pf_res = 0.0 if (mask != 0 or tot >= 64.0) else (0.82 if tot >= 21.5 else (0.56 if tot >= 14.5 else (0.34 if tot >= 10.0 else 0.22)))
-    margin = ENGINE_MARGIN_GB if tot < 14.5 else 0.45
-    reserve = work + kv_res + wkv + cublas_gb + pf_res + margin
+    reserve = work + kv_res + wkv + runtime_gb + pf_res + floor
+    if multi_gpu:
+        # plan_memory reserves primary workspace for at least one peer and an optional vision shard.
+        # The caller has aggregate helper VRAM. Additional peers each need a graph workspace of their own.
+        reserve += 0.30 + 0.05 + chunk * 1536 * 4 / 1e9
+        if vision:
+            reserve += 1.15
     return {
         "chunk": chunk,
         "work_gb": round(work, 3),
@@ -205,8 +221,7 @@ def engine_plan(vram_gib: float, ctx: int | None = None, dense_gb: float = 5.80,
 
 
 def host_kv_gb(ctx: int | None = None, vram_gib: float = 8.0) -> float:
-    """Pinned host memory the engine's KV state takes at `ctx` tokens on a card of `vram_gib` (GB): ~3.02 GB at 128K on an 8 GiB card (Vt-free rows + IndexPool once a prompt
-    passes the ~94K positions the card keeps), 0 GB on >= 12 GiB cards that hold all 128K positions in VRAM."""
+    """Estimated pinned memory for the KV state (GB), including the margin when rows spill onto the host."""
     return engine_plan(vram_gib, ctx)["host_need_gb"]
 
 
@@ -219,18 +234,26 @@ def kv_in_host(vram_gib: float | None, ctx: int | None = None) -> bool:
 def compute(build: str, vram_gib: float, ram_gib: float, ctx: int | None = None, vision: bool = False, extra_vram_gib: float = 0.0) -> dict:
     """Where the expert bodies of `build` go on a PC with a card of `vram_gib` (plus optional `extra_vram_gib` on helper GPUs) and `ram_gib` of main memory (GiB): GB in video
     memory, in RAM, on the SSD.  At the author's 20K (and below) the author's rule holds.  Beyond it the engine's own plan decides (`engine_plan`): the primary card keeps the
-    buffers and the KV state it holds free of experts (on an 8 GiB card the first ~94K positions: growable KV), helper GPUs hold routed experts only, and mapped embed_tokens
-    (0.38 GB on < 48 GiB cards) plus any spilled host KV and pinned headroom come out of RAM."""
+    buffers and its KV state free of experts, helper GPUs hold routed experts only, and mapped embed_tokens
+    (0.38 GB on < 48 GiB cards) plus any spilled host KV and pinned headroom come out of RAM.
+    The post-20K estimate treats aggregate helper VRAM as one idle helper. More helpers need additional workspace."""
     info = BUILDS[build]
     n = DEFAULT_CONTEXT if ctx is None else int(ctx)
+    helper_gib = float(extra_vram_gib or 0.0)
+    peer_reserve_gb = PEER_OVERHEAD_GB
     if n > AUTHOR_CONTEXT and vram_gib > 0:
-        plan = engine_plan(vram_gib, n, info["dense_gb"])
+        plan = engine_plan(vram_gib, n, info["dense_gb"], multi_gpu=helper_gib > 0, vision=vision)
         primary_room = max(0.0, vram_gib * GIB_TO_GB - plan["trunk_gb"] - plan["reserve_gb"])
         host = plan["host_need_gb"]
+        if helper_gib > 0:
+            # The loader sets aside the larger of 1 GiB and the peer's chunk buffers plus 512 MiB for graphs.
+            tokens = max(plan["chunk"], 1024)
+            workspace_bytes = tokens * (16 * 1536 * 6 + 1536 * 10) + (512 << 20)
+            peer_reserve_gb = max(1 << 30, workspace_bytes) / 1e9
     else:
         primary_room = max(0.0, vram_gib * GIB_TO_GB - info["dense_gb"] - non_expert_gb(ctx))
         host = 0.0
-    extra_room = max(0.0, float(extra_vram_gib) * GIB_TO_GB - PEER_OVERHEAD_GB) if extra_vram_gib and extra_vram_gib > 0 else 0.0
+    extra_room = max(0.0, helper_gib * GIB_TO_GB - peer_reserve_gb)
     gpu_room = primary_room + extra_room
     ram_room = max(0.0, ram_gib * GIB_TO_GB - OS_RESERVE_GB - HOT_ENGRAM_GB - (VISION_GB if vision else 0.0) - ((host + HOST_PIN_HEADROOM_GB) if host > 0 else 0.0))
     in_vram = min(info["bodies_gb"], gpu_room)
