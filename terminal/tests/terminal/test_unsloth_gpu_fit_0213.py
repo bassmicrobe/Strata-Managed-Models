@@ -7,7 +7,9 @@ IQ3_S, with the same 50 GB of experts, said "fits, a bit slower".
 """
 from __future__ import annotations
 
+import os
 import unittest
+from unittest import mock
 
 from strata_cli.launch.catalog import FITS, NO, SLOWER, verdict
 from strata_control import fit_label
@@ -47,7 +49,8 @@ class TheTerminalMenu(unittest.TestCase):
             return {(r.family, r.model): r for r in catalog(hw).rows()}
 
     def test_the_v100_screenshot(self):
-        rows = self.rows(HW_V100_31)
+        with mock.patch.dict(os.environ, {"STRATA_HY4_SHOW": "1"}):
+            rows = self.rows(HW_V100_31)
         for (family, model), r in rows.items():
             if family == "hy4-flash":
                 # Hy4-Flash uses its own rank-cut placement rule (strata_control/hy4_fit.py, pinned by test_hy4_fit.py), which reserves OS/Engram/KV room.
@@ -55,9 +58,12 @@ class TheTerminalMenu(unittest.TestCase):
                 continue
             want = FITS if r.fit_gb <= 63.0 else SLOWER
             self.assertEqual((r.verdict, r.words), (want, "fits" if want == FITS else "may run slower"), (family, model, r.fit_gb))
-        if ("hy4-flash", "SQ-64") in rows:
-            self.assertEqual(rows[("hy4-flash", "SQ-64")].words, "fits")            # elastic 16K KV keeps SQ-64 near-resident (<= 5 GB cold tail on SSD)
-            self.assertEqual(rows[("hy4-flash", "SQ-96")].words, "may run slower")
+        # The 128K SQ-64 estimate crosses the 5 GB SSD threshold only on Windows:
+        # the WDDM reserve leaves 5.31 GB on SSD versus 4.74 GB on Linux.
+        sq64 = rows[("hy4-flash", "SQ-64")]
+        expected = (SLOWER, "may run slower") if os.name == "nt" else (FITS, "fits")
+        self.assertEqual((sq64.verdict, sq64.words), expected)
+        self.assertEqual(rows[("hy4-flash", "SQ-96")].words, "may run slower")
         for m in ("UD-IQ1_M", "UD-Q2_0", "UD-IQ2_XS", "UD-Q2_K_XL", "UD-IQ3_XXS", "UD-Q3_K_XL"):         # the Unsloth sets that were "too big", 39 to 61 GB
             self.assertEqual(rows[("unsloth", m)].words, "fits", m)
         for m in ("UD-IQ4_XS", "UD-IQ4_XS-v31", "UD-Q4_K_XL", "UD-Q5_K_XL", "UD-Q6_K_XL", "Q8_0"):
