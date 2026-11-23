@@ -61,7 +61,7 @@ async function rig(t, api, chunkDelayMs = 5, workerOptions = {}, context = 32768
   const dir = mkdtempSync(join(tmpdir(), 'strata-auto-context-'));
   const ws = join(dir, 'ws'); mkdirSync(ws);
   const local = [{ id: 'i', label: 'Scripted', baseUrl: worker.url, modelId: 'scripted-model', context }];
-  const connections = api ? [{ id: 'managed', name: 'Managed model', baseUrl: worker.url, protocol: 'openai-chat', models: [{ id: 'scripted-model', contextMax: context }] }] : [];
+  const connections = api ? [{ id: 'managed', name: 'Managed model', baseUrl: worker.url, protocol: 'openai-chat', reasoningFormat: 'strata', models: [{ id: 'scripted-model', contextMax: context }] }] : [];
   const bridge = createAgentBridge({ dataDir: dir, localInstances: () => api ? [] : local, connections: () => connections, env: process.env, startTimeoutMs: 90_000 });
   t.after(async () => { await bridge.close(); await worker.close(); try { rmSync(dir, { recursive: true, force: true, maxRetries: 3 }); } catch { /* Windows sandbox cleanup is best effort */ } });
   return { bridge, worker, options: { chatId: 'recover', workspacePath: ws, mode: 'bypass', choice: api ? { connectionId: 'managed', modelId: 'scripted-model' } : null } };

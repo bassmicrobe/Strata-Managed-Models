@@ -22,6 +22,7 @@ import { bindingFor, bindingKeys, useBindings } from '../lib/shortcut-bindings';
 import { Btn, Dialog, Icon, IconBtn, Select, type IconName } from '../components/ui';
 import { workspaceIdForSession } from '../lib/session-workspace';
 import { Brand } from '../components/Brand';
+import { appVersionLabel, releaseVersionBadge } from '../lib/app-version';
 import { addWorkspace, deleteDamagedChat, deleteSession, go, isUnread, liveChatIds, moveSession, pickWorkspace, renameSession, removeWorkspace, renameWorkspace, selectSession, setActiveWorkspace, setNavOpen, togglePin, toggleRail, setTheme, useStore } from '../lib/store';
 export function Sidebar({ containerRef }: {
     containerRef: RefObject<HTMLElement | null>;
@@ -70,10 +71,11 @@ export function Sidebar({ containerRef }: {
     const menuTrigger = useRef<HTMLElement | null>(null);
     const current = library?.variants.find(v => v.id === library.loaded);
     const native = useNative(), nativeCurrent = native?.instances.find(i => i.id === native.defaultId);
-    const managed = useManagedModels();
-    const managedActive = managed?.enabled ? managed.models.find(model => model.id === managed.activeId) : undefined;
+    const appVersion = releaseVersionBadge(appVersionLabel(useStore(s => s.setup?.app.version), native?.version));
     // A model picked from an API connection (chat header) is a model to chat with: the chip names it and its connection while no local model is loaded.
     const remoteChoice = useStore(s => s.remoteModel), remoteProviders = useStore(s => s.providers);
+    const managed = useManagedModels();
+    const managedActive = managed?.enabled ? managed.models.find(model => model.id === managed.activeId) : undefined;
     // The managed provider also lists stopped models. Only its running model belongs on the chip.
     const pickedApi = managed?.enabled && remoteChoice?.connectionId === managed.connectionId ? null : remoteChoice;
     const remoteChosen = !current && !nativeCurrent && !managedActive ? chosenRemote(remoteProviders, pickedApi) : null;
@@ -144,7 +146,7 @@ export function Sidebar({ containerRef }: {
         <NavLink route="skills" label={tr("Skills")} icon="skills" current={location.route}/>
         <NavLink route="monitor" label={tr("Monitor")} icon="activity" current={location.route}/>
         <NavLink route="models" label={tr("Models")} icon="models" current={location.route === 'tuning' ? 'models' : location.route}/>
-        <div className="nav__bottom"><MoreMenu current={location.route}/><button className="st-btn st-btn--icon theme-switch" aria-label={tr(dark ? 'Switch to light mode' : 'Switch to dark mode')} title={tr(dark ? 'Switch to light mode' : 'Switch to dark mode')} onClick={() => setTheme(dark ? 'light' : 'dark')}><span key={String(dark)} className="theme-switch__icon"><Icon name={dark ? 'sun' : 'moon'} size={19}/></span></button></div>
+        <div className="nav__bottom"><MoreMenu current={location.route}/>{appVersion ? <a className="nav__version nav__rail-hide" href={href('settings')} title={`Strata ${appVersion}`} aria-label={`Strata ${appVersion}`}>{appVersion}</a> : null}<button className="st-btn st-btn--icon theme-switch" aria-label={tr(dark ? 'Switch to light mode' : 'Switch to dark mode')} title={tr(dark ? 'Switch to light mode' : 'Switch to dark mode')} onClick={() => setTheme(dark ? 'light' : 'dark')}><span key={String(dark)} className="theme-switch__icon"><Icon name={dark ? 'sun' : 'moon'} size={19}/></span></button></div>
       </div>
     </aside>
     {tr(menuId && menuSession ? <FloatingMenu anchor={menuTrigger.current} title={tr("Actions for {0}", [sessionTitle(menuSession)])} onClose={closeMenu}>

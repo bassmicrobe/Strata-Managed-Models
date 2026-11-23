@@ -256,7 +256,7 @@ export function createManagedLocalModels({ configPath = process.env.STRATA_MANAG
   }
   function providerRegistration(baseUrl) {
     requireEnabled();
-    return { kind: 'custom', name: cfg.name ?? 'このPCのモデル', baseUrl, protocol: 'openai-chat', apiKey: token,
+    return { kind: 'custom', name: cfg.name ?? 'このPCのモデル', baseUrl, protocol: 'openai-chat', reasoningFormat: 'strata', apiKey: token,
       models: models.map(publicModel).map(m => ({ id: m.modelId, name: m.label, contextMax: m.contextMax,
         maxOutput: m.maxOutput, vision: m.vision, reasoning: m.reasoning })) };
   }

@@ -131,7 +131,7 @@ function balancedBefore(messages, i) {
  * Split messages into runs that each fit `budget` real tokens (price `density`), cutting between a tool call's result and the next
  * message when it can. A message bigger than the budget by itself is clipped first. Order is kept.
  */
-export function splitMessages(messages, budget, density = 1) {
+export function splitMessages(messages, budget, density = 1, unclipped) {
   const room = Math.max(512, budget);
   const sized = messages.flatMap(message => {
     const limit = Math.floor(room * 0.8);
@@ -139,7 +139,9 @@ export function splitMessages(messages, budget, density = 1) {
     const content = message?.content;
     if (!['user', 'assistant'].includes(message?.role) || !Array.isArray(content) ||
       !content.length || content.some(b => !['text', 'reasoning'].includes(b?.type) || typeof b.text !== 'string')) {
-      return [clipMessage(message, limit, density)];
+      const clipped = clipMessage(message, limit, density);
+      if (clipped !== message) unclipped?.set(clipped, message);
+      return [clipped];
     }
     // A giant old prompt must not lose facts in its middle when summarized.
     // Split text-only messages losslessly; tool-call/result groups retain the
@@ -186,7 +188,7 @@ export function isContextOverflow(error) {
 
 /** The Harness asks for "concise English engineering prose", so a Chinese or Russian chat came back summarised in English (#4750). One sentence is added to the
  *  summary request's last message: write it in the language the person used. Paths, commands and identifiers stay exact. Messages are not changed in place. */
-export const SUMMARY_LANGUAGE_RULE = 'Write the summary in the language the person used in this conversation (English only when they wrote English). The instruction above is in English; that does not change the language of the summary. Keep file paths, commands, error strings, identifiers and numbers exactly as they appear.';
+export const SUMMARY_LANGUAGE_RULE = 'Write in the language the person used. Keep the current request and constraints, completed work with concrete tool evidence, unresolved blockers, and the next step. Preserve exact paths, commands, errors, identifiers and numbers. Distinguish actions that ran from proposed or incomplete calls so they are not replayed. Summarize conclusions without reproducing internal reasoning.';
 export function withSummaryLanguage(messages) {
   if (!Array.isArray(messages) || !messages.length) return messages;
   const last = messages[messages.length - 1];

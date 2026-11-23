@@ -70,9 +70,9 @@ function NativeChatModelPicker() {
             <button className="menu__item" role="menuitem" onClick={() => { setOpen(false); setSettingsSection('Models'); go('settings'); }}><Icon name="link"/>{tr('Manage API models')}</button>
         </FloatingMenu>}
         <Dialog open={pending !== null} title={tr('Loading model')} noClose compact onClose={() => {}} actions={loadingJob?.state === 'running' ? <Btn variant="ghost" onClick={() => void nativeAction(`operations/${loadingJob.id}/cancel`).catch(failure => setError(failure.message))}>{tr('Cancel')}</Btn> : undefined}>
-            <div className="stack stack--sm" role="status" aria-live="polite"><strong>{pending?.label}</strong><Bar value={0} indeterminate label={tr(loadingJob?.summary || 'Loading model')}/>{error && <ErrorNotice message={error}/>}<p className="small muted">{tr('Your conversations stay saved.')}</p></div>
+            <div className="stack stack--sm" role="status" aria-live="polite"><strong>{pending?.label}</strong><Bar value={0} indeterminate label={tr(loadingJob?.summary || 'Loading model')}/>{error && <ErrorNotice message={error}/>}<p className="small muted">{tr('This switches the model version for all chats. Your conversations stay saved.')}</p></div>
         </Dialog>
-        <Dialog open={!!error && !pending} title={tr('Model could not load')} compact onClose={() => setError('')} actions={<Btn onClick={() => setError('')}>{tr('Close')}</Btn>}><ErrorNotice message={error}/></Dialog>
+        <Dialog open={!!error && !pending} title={tr('Could not load model')} compact onClose={() => setError('')} actions={<Btn onClick={() => setError('')}>{tr('Close')}</Btn>}><ErrorNotice message={error}/></Dialog>
     </>;
 }
 function LegacyChatModelPicker() {

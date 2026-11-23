@@ -106,6 +106,7 @@ test('catalog requires gateway authentication and keeps server-only details priv
   const state = await h.gateway.publicState({ refresh: false });
   assert.doesNotMatch(JSON.stringify(state), /gateway-private|private-backend|18081|\.ps1|\.key/);
   const registration = h.gateway.providerRegistration(h.base + '/v1');
+  assert.equal(registration.reasoningFormat, 'strata');
   assert.equal(registration.apiKey, h.token);
   assert.equal(registration.models.length, 3);
   h.gateway.setConnectionId('preserved-existing-provider');
