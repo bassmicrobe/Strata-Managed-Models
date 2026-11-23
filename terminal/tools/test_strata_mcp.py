@@ -8,6 +8,7 @@ background processes, status against a fake HTTP server, and that the built-in m
 """
 from __future__ import annotations
 
+import contextlib
 import io
 import json
 import os
@@ -504,12 +505,19 @@ class Install(FakeRoot):
     def test_a_start_that_came_in_before_a_cancel_does_not_launch_the_job(self):
         """The app quit while "Prepare and load" was starting: the cancel got the installer's lock first and found nothing to stop; the start then
         launched the job and its packer with nobody left to stop them."""
-        res, err = self.call("strata_install", {})
-        self.assertFalse(err)
-        res, err = self.call("strata_install", {"cancel": True})
-        self.assertIn("no install is running", res["summary"])
-        stamp = self.strata.install_cancelled_at
-        with mock.patch.object(M.time, "monotonic", return_value=stamp - 5.0):       # this start came in before the cancel
+        lock = self.strata.lock
+
+        @contextlib.contextmanager
+        def cancel_before_lock():
+            # Schedule the cancel after the start enters strata_install but before it acquires the lock.
+            with mock.patch.object(self.strata, "lock", lock):
+                res, err = self.call("strata_install", {"cancel": True})
+                self.assertFalse(err, res)
+                self.assertIn("no install is running", res["summary"])
+            with lock:
+                yield
+
+        with mock.patch.object(self.strata, "lock", cancel_before_lock()):
             res, err = self.call("strata_install", {"family": "coder", "confirm": True})
         self.assertTrue(err)
         self.assertIn("cancelled before it started", res["error"])
