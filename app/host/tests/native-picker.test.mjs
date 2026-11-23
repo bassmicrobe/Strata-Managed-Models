@@ -8,6 +8,16 @@ const {nativePickerModels,nativePickerLoadRequest,waitForNativePickerModel}=awai
 const instance=(id,model,label,status='ready')=>({id,model,label,status,context:8192});
 const installed=(model,model_name,ready=true)=>({model,model_name,ready,config:`strata-${model}.json`,context:32768});
 
+test('a failed native instance cannot be selected, and a saved model can be loaded again', () => {
+    const rows = nativePickerModels(
+        [installed('retry', 'Saved copy')],
+        [instance('ok', 'running', 'Ready'), instance('bad', 'retry', 'Failed', 'error'),
+         instance('missing', 'unsaved', 'Failed without saved files', 'error')],
+    );
+    assert.deepEqual(rows.map(row => row.key), ['instance:ok', 'installed:retry']);
+    assert.deepEqual(rows.map(row => row.status), ['ready', 'installed']);
+});
+
 test('added/downloaded native models remain in the picker beside running models and do not deduplicate by display name',()=>{
     const models=[installed('first','Same name'),installed('second','Same name'),installed('third','User model'),installed('partial','Partial files',false)];
     const running=[instance('running-first','first','Renamed by user'),instance('second-copy','first','Second loaded instance'),instance('failed','third','User model','error')];
