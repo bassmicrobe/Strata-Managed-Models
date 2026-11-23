@@ -98,7 +98,7 @@ export async function inspectInstalledCoding(port,{data,expected}={}){
 
 /** No model weights: the installed Harness and command executor use a scripted loopback model. */
 export async function exerciseInstalledHarness(port,{app,coding}={}){
-  const {startScriptedWorker}=await import('../../apps/host/tests/helpers/scripted-worker.mjs');
+  const {startScriptedWorker}=await import('../../app/host/tests/helpers/scripted-worker.mjs');
   const worker=await startScriptedWorker({model:'installer-tool-model',chunkDelayMs:1});
   let connectionId;
   try{
@@ -153,7 +153,7 @@ export async function verifyWindowsInstaller({installer,workRoot,run=runInstalle
   const existing=registry.stdout?.trim();if(existing){const target=existsSync(existing)?realpathSync(existing):resolve(existing),rel=relative(realpathSync(workRoot),target);if(rel.startsWith('..')||isAbsolute(rel))throw Error('A real installation is already registered. Use a clean test account.');}
   const invokeSetup=async name=>{phase(name);try{return await run(installer,['/S','/D='+app],{cwd:workRoot,env,timeoutMs:240000,verbatim:true});}catch(error){diagnostics();throw error;}};
   await invokeSetup('Installing into the isolated test folder');
-  for(const path of ['StrataManaged.exe','runtime/runtime.mjs','resources/desktop/StrataWindow.exe','resources/node/node.exe','resources/control/python/python.exe','resources/harness/lib/bin.js','resources/harness/BUNDLE.json','resources/harness/LICENSE','resources/harness/THIRD_PARTY_NOTICES.md','host/server/index.mjs','host/dist/index.html','README.ja.txt'])assert(existsSync(join(app,path)),'Missing installed file: '+path);
+  for(const path of ['StrataManaged.exe','runtime/runtime.mjs','runtime/close-saved-host.mjs','resources/desktop/StrataWindow.exe','resources/node/node.exe','resources/control/python/python.exe','resources/harness/lib/bin.js','resources/harness/BUNDLE.json','resources/harness/LICENSE','resources/harness/THIRD_PARTY_NOTICES.md','host/server/index.mjs','host/dist/index.html','README.ja.txt'])assert(existsSync(join(app,path)),'Missing installed file: '+path);
   const programs=await run('powershell.exe',['-NoLogo','-NoProfile','-Command',"[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); [Environment]::GetFolderPath('Programs')"],{cwd:workRoot,env});
   const startMenu=join(programs.stdout.trim(),'Strata Managed Models');
   for(const name of ['Tailscaleで共有','Tailscale共有を停止','Strataを停止','自動テストでコーディング'])assert(existsSync(join(startMenu,name+'.lnk')),'Missing Japanese Start Menu shortcut: '+name);

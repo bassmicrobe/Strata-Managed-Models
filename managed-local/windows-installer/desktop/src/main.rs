@@ -258,8 +258,14 @@ fn stop_local_models(app: &AppHandle, close_after: bool) {
     if close_after { closing_title(app, true); }
     let app = app.clone();
     std::thread::spawn(move || {
-        let status = Command::new("node.exe").arg(script)
-            .creation_flags(CREATE_NO_WINDOW).output()
+        let close_script = script.with_file_name("close-saved-host.mjs");
+        let mut command = Command::new("node.exe");
+        if close_after && close_script.is_file() {
+            command.arg(close_script).arg("--local");
+        } else {
+            command.arg(script);
+        }
+        let status = command.creation_flags(CREATE_NO_WINDOW).output()
             .ok().and_then(|output| output.status.code());
         let ui = app.clone();
         let _ = app.run_on_main_thread(move || {

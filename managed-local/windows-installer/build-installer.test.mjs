@@ -58,8 +58,8 @@ test('installer host copy refuses a link before packaging any linked file',()=>{
 });
 test('license collection carries exact frontend license texts and retains only installed production packages',()=>{
   const root=temp(),target=join(root,'licenses');save(join(root,'LICENSE'),'Strata MIT text');
-  save(join(root,'apps/host/package-lock.json'),JSON.stringify({packages:{'':{dependencies:{react:'1'}},'node_modules/react':{version:'1'},'node_modules/dev-tool':{version:'2',dev:true},'node_modules/optional-absent':{version:'3'}}}));
-  save(join(root,'apps/host/node_modules/react/LICENSE'),'React MIT notice');save(join(root,'apps/host/node_modules/dev-tool/LICENSE'),'dev only');
+  save(join(root,'app/host/package-lock.json'),JSON.stringify({packages:{'':{dependencies:{react:'1'}},'node_modules/react':{version:'1'},'node_modules/dev-tool':{version:'2',dev:true},'node_modules/optional-absent':{version:'3'}}}));
+  save(join(root,'app/host/node_modules/react/LICENSE'),'React MIT notice');save(join(root,'app/host/node_modules/dev-tool/LICENSE'),'dev only');
   const result=collectLicenses(root,target);assert.deepEqual(result,{packages:1,files:1});
   const folder=readdirSync(target).find(name=>name.startsWith('react-'));assert.equal(readFileSync(join(target,folder,'LICENSE'),'utf8'),'React MIT notice');
   assert.equal(readFileSync(join(target,'Strata-LICENSE.txt'),'utf8'),'Strata MIT text');assert(!readdirSync(target).some(name=>name.startsWith('dev-tool')));

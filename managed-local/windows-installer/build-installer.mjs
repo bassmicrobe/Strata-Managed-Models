@@ -49,7 +49,7 @@ export function collectLicenses(repoRoot,destination){
   mkdirSync(destination,{recursive:true});
   const license=join(repoRoot,'LICENSE');if(!existsSync(license))throw Error('Strata LICENSE is missing.');
   copyFileSync(license,join(destination,'Strata-LICENSE.txt'));
-  const host=join(repoRoot,'apps/host'),lock=JSON.parse(readFileSync(join(host,'package-lock.json'),'utf8'));
+  const host=join(repoRoot,'app/host'),lock=JSON.parse(readFileSync(join(host,'package-lock.json'),'utf8'));
   const notices=['# Third-party notices','','Strata: MIT. See Strata-LICENSE.txt.','Node.js: see resources/node/LICENSE.','Strata Control and its bundled Python packages: see resources/control and the included package metadata.','DeepSeek Harness and its production dependencies: see resources/harness/LICENSE, resources/harness/THIRD_PARTY_NOTICES.md and the license files in resources/harness/node_modules.',''];
   let packages=0,files=0;
   for(const [path,entry] of Object.entries(lock.packages??{})){
@@ -218,7 +218,7 @@ export async function buildWindowsInstaller({repoRoot,hostSourceRoot=repoRoot,ve
   await download(harnessSource.url,harnessArchive,harnessSource.sha256,{fetchImpl});
   console.log('Staging the coding assistant from the verified official Windows installer.');
   const harness=await stageHarness({archive:harnessArchive,work,destination:join(payload,'resources/harness'),node:join(nodeTarget,'node.exe'),run});
-  const host=copyHost(join(hostSourceRoot,'apps/host'),join(payload,'host'));
+  const host=copyHost(join(hostSourceRoot,'app/host'),join(payload,'host'));
   const runtimeSource=join(repoRoot,'managed-local/windows-installer/runtime');if(!existsSync(join(runtimeSource,'Launcher.cs'))||!existsSync(join(runtimeSource,'runtime.mjs')))throw Error('Portable launcher runtime sources are missing.');
   cpSync(runtimeSource,join(payload,'runtime'),{recursive:true,filter:file=>!file.endsWith('Launcher.cs')});
   const licenses=collectLicenses(repoRoot,join(payload,'licenses'));
@@ -226,7 +226,7 @@ export async function buildWindowsInstaller({repoRoot,hostSourceRoot=repoRoot,ve
   const webview2=await webviewBootstrapper(cache,work,run,fetchImpl);
   const readme=join(repoRoot,'managed-local/windows-installer/README.ja.md');if(!existsSync(readme))throw Error('The Japanese installer README is missing.');
   copyFileSync(readme,join(payload,'README.ja.md'));writeFileSync(join(payload,'README.ja.txt'),'\uFEFF'+readFileSync(readme,'utf8').replace(/^\uFEFF/,''));
-  const icon=join(repoRoot,'apps/desktop/src-tauri/icons/icon.ico');
+  const icon=join(repoRoot,'app/desktop/src-tauri/icons/icon.ico');
   const csc=join(process.env.WINDIR||'C:/Windows','Microsoft.NET/Framework64/v4.0.30319/csc.exe');if(!existsSync(csc))throw Error('The Windows .NET Framework C# compiler is unavailable.');
   await invoke(run,csc,['/nologo','/codepage:65001','/target:winexe','/optimize+','/platform:x64','/reference:System.Windows.Forms.dll','/reference:System.Drawing.dll','/reference:System.Web.Extensions.dll',...(existsSync(icon)?['/win32icon:'+icon]:[]),'/out:'+join(payload,'StrataManaged.exe'),join(runtimeSource,'Launcher.cs')],{cwd:work});
   const metadata={schema_version:1,product:PRODUCT,version,commit,releaseTag,nodeVersion:NODE_VERSION,controlVersion:control.version,harnessVersion:harness.version,harnessSourceVersion:version,harnessSourceSha256:harnessSource.sha256};writeFileSync(join(payload,'managed-install.json'),JSON.stringify(metadata,null,2));

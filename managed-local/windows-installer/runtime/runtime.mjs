@@ -8,6 +8,7 @@ import {randomUUID} from 'node:crypto';
 import {fetchForkRelease,stageForkRelease,stageForkInstaller,FORK_REPOSITORY} from './fork-stage.mjs';
 import {readTailscaleConfig,planTailscale,applyTailscale,disableTailscale,tailscaleOrigin} from './tailscale.mjs';
 import {configureCoding,refreshCodingPolicy} from './coding.mjs';
+import {savedHostRoot,closeSavedHost} from './close-saved-host.mjs';
 
 const sleep=ms=>new Promise(done=>setTimeout(done,ms));
 const json=file=>JSON.parse(readFileSync(file,'utf8').replace(/^\uFEFF/,''));
@@ -93,7 +94,7 @@ async function startHost(paths,active,{profile=paths.profile,smoke=false,managed
   catch(error){if(child.exitCode===null)child.kill();throw error;}
 }
 async function waitExit(pid){for(let i=0;i<150;i++){if(!await processIdentity(pid))return;await sleep(100);}throw fail('Strata is still closing. Try again in a moment.');}
-export async function stopHost(paths,{token,record,modelsOnly=false}={}){
+export async function stopHost(paths,{token,record,modelsOnly=false,shutdownSavedHost}={}){
   record??=await ownedRecord(paths);
   if(!record){if(modelsOnly)throw fail('Strataの実行状態を確認できません。画面を開き直してください。');return;}
   if(!token){
@@ -102,18 +103,24 @@ export async function stopHost(paths,{token,record,modelsOnly=false}={}){
     if(before.maintenance.active)throw fail('Strataの更新処理が終わってから、もう一度お試しください。');
     const id=randomUUID(),renew=()=>atomicJson(paths.maintenanceFile,{pid:process.pid,id,reason:'stop',expiresAt:Date.now()+120000});renew();
     const timer=setInterval(renew,20000);timer.unref();
-    try{return await stopHost(paths,{record,token:id,modelsOnly});}
+    try{return await stopHost(paths,{record,token:id,modelsOnly,shutdownSavedHost});}
     finally{clearInterval(timer);try{if(json(paths.maintenanceFile).id===id)unlinkSync(paths.maintenanceFile);}catch{}}
   }
   const current=await snapshot(record);
   if(!current.maintenance.enabled||!current.maintenance.active)throw fail('Strata could not guard the shutdown. Try again after updating the app.');
   if(isBusy(current.native,current.serving,current.maintenance,current.agent,current.managed))throw fail('回答やモデルの処理が終わってから、もう一度お試しください。');
   for(const instance of current.native.instances)if(modelsOnly||instance.status!=='error')await request(record,`/api/native/instances/${encodeURIComponent(instance.id)}/unload`,{method:'POST',token});
-  if(current.managed?.enabled&&current.managed.activeIds?.length){
-    const stop=json(join(paths.dataRoot,'managed-models.json')).stopCommand;
-    if(!stop)throw fail('保存済みモデルの停止設定が見つかりません。');
-    const {runManagedCommand}=await import(pathToFileURL(join(dirname(record.entry),'managed-local-models.mjs')));
-    await runManagedCommand(stop);
+  const modelsLoaded=Boolean(current.managed?.activeIds?.length);
+  if(current.managed?.enabled&&(modelsLoaded||shutdownSavedHost)){
+    const config=json(join(paths.dataRoot,'managed-models.json'));
+    const root=shutdownSavedHost&&savedHostRoot(config);
+    if(root){
+      await shutdownSavedHost(root,{modelsLoaded});
+    }else if(modelsLoaded){
+      if(!config.stopCommand)throw fail('保存済みモデルの停止設定が見つかりません。');
+      const {runManagedCommand}=await import(pathToFileURL(join(dirname(record.entry),'managed-local-models.mjs')));
+      await runManagedCommand(config.stopCommand);
+    }
   }
   if(modelsOnly)return;
   if(!ownsProcess(paths,record,await processIdentity(record.pid)))throw fail('The Strata process changed while closing.');
@@ -197,7 +204,7 @@ export async function main(args=process.argv.slice(2),options={}){
   const showBrowser=options.openBrowser??openBrowser,checkRelease=options.fetchRelease??fetchForkRelease;
   await makePrivate(paths);mkdirSync(join(paths.dataRoot,'logs'),{recursive:true});
   const log=message=>writeFileSync(join(paths.dataRoot,'logs/launcher.log'),new Date().toISOString()+' '+message+'\n',{flag:'a',mode:0o600});
-  if(args.includes('--stop')){await stopHost(paths);return{stopped:true};}
+  if(args.includes('--stop')){await stopHost(paths,{shutdownSavedHost:options.closeSavedHost??closeSavedHost});return{stopped:true};}
   if(args.includes('--stop-models')){await stopHost(paths,{modelsOnly:true});return{modelsStopped:true};}
   if(!args.includes('--smoke'))try{refreshCodingPolicy(paths);}catch(error){if(args.includes('--coding'))throw error;log('自動テストの指示を更新できませんでした。保存済みの指示を確認してください。');}
   const metadata=json(join(paths.appRoot,'managed-install.json'));
