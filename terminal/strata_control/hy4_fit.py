@@ -141,7 +141,8 @@ def non_expert_gb(ctx: int | None = None) -> float:
     return VRAM_NON_EXPERT_GB + kv_extra_gb(ctx)
 
 
-def engine_plan(vram_gib: float, ctx: int | None = None, dense_gb: float = 5.80, kv_q8: bool = False, *, multi_gpu: bool = False) -> dict:
+def engine_plan(vram_gib: float, ctx: int | None = None, dense_gb: float = 5.80, kv_q8: bool = False, *,
+                multi_gpu: bool = False, vision: bool = False) -> dict:
     """Estimate the initial placement for setup using the default CUDA engine with the drafter enabled.
     - Discrete cards (< 48 GiB) keep embed_tokens (0.38 GB) in pinned mapped host memory and use single-layer reusable wk/wv scratch (0.03 GB).
     - Single discrete cards below 48 GiB grow their KV+IndexPool from 4K, 8K or 16K slots; multi-GPU reserves the full context.
@@ -199,6 +200,12 @@ def engine_plan(vram_gib: float, ctx: int | None = None, dense_gb: float = 5.80,
     kv_res = 0.0 if (mask & 1) else (kv_init_gb if init_slots < n else (dev_pos * per_pos / 1e9 if dev_pos else (rows + pivg)))
     pf_res = 0.0 if (mask != 0 or tot >= 64.0) else (0.82 if tot >= 21.5 else (0.56 if tot >= 14.5 else (0.34 if tot >= 10.0 else 0.22)))
     reserve = work + kv_res + wkv + runtime_gb + pf_res + floor
+    if multi_gpu:
+        # plan_memory reserves primary workspace for at least one peer and an optional vision shard.
+        # The caller has aggregate helper VRAM. Additional peers each need a graph workspace of their own.
+        reserve += 0.30 + 0.05 + chunk * 1536 * 4 / 1e9
+        if vision:
+            reserve += 1.15
     return {
         "chunk": chunk,
         "work_gb": round(work, 3),
@@ -228,17 +235,25 @@ def compute(build: str, vram_gib: float, ram_gib: float, ctx: int | None = None,
     """Where the expert bodies of `build` go on a PC with a card of `vram_gib` (plus optional `extra_vram_gib` on helper GPUs) and `ram_gib` of main memory (GiB): GB in video
     memory, in RAM, on the SSD.  At the author's 20K (and below) the author's rule holds.  Beyond it the engine's own plan decides (`engine_plan`): the primary card keeps the
     buffers and its KV state free of experts, helper GPUs hold routed experts only, and mapped embed_tokens
-    (0.38 GB on < 48 GiB cards) plus any spilled host KV and pinned headroom come out of RAM."""
+    (0.38 GB on < 48 GiB cards) plus any spilled host KV and pinned headroom come out of RAM.
+    The post-20K estimate treats aggregate helper VRAM as one idle helper. More helpers need additional workspace."""
     info = BUILDS[build]
     n = DEFAULT_CONTEXT if ctx is None else int(ctx)
+    helper_gib = float(extra_vram_gib or 0.0)
+    peer_reserve_gb = PEER_OVERHEAD_GB
     if n > AUTHOR_CONTEXT and vram_gib > 0:
-        plan = engine_plan(vram_gib, n, info["dense_gb"], multi_gpu=extra_vram_gib > 0)
+        plan = engine_plan(vram_gib, n, info["dense_gb"], multi_gpu=helper_gib > 0, vision=vision)
         primary_room = max(0.0, vram_gib * GIB_TO_GB - plan["trunk_gb"] - plan["reserve_gb"])
         host = plan["host_need_gb"]
+        if helper_gib > 0:
+            # The loader sets aside the larger of 1 GiB and the peer's chunk buffers plus 512 MiB for graphs.
+            tokens = max(plan["chunk"], 1024)
+            workspace_bytes = tokens * (16 * 1536 * 6 + 1536 * 10) + (512 << 20)
+            peer_reserve_gb = max(1 << 30, workspace_bytes) / 1e9
     else:
         primary_room = max(0.0, vram_gib * GIB_TO_GB - info["dense_gb"] - non_expert_gb(ctx))
         host = 0.0
-    extra_room = max(0.0, float(extra_vram_gib) * GIB_TO_GB - PEER_OVERHEAD_GB) if extra_vram_gib and extra_vram_gib > 0 else 0.0
+    extra_room = max(0.0, helper_gib * GIB_TO_GB - peer_reserve_gb)
     gpu_room = primary_room + extra_room
     ram_room = max(0.0, ram_gib * GIB_TO_GB - OS_RESERVE_GB - HOT_ENGRAM_GB - (VISION_GB if vision else 0.0) - ((host + HOST_PIN_HEADROOM_GB) if host > 0 else 0.0))
     in_vram = min(info["bodies_gb"], gpu_room)
