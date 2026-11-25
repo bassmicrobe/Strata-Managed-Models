@@ -31,9 +31,12 @@ class _SysAs:
         return getattr(sys, name)
 
 
-#: The engine stub: the strings drafting.engine_form / engine_reads_selector_q4 look for in the program file (a current engine carries them).
+#: The engine stub: the strings drafting.engine_form / engine_reads_selector_q4 / engine_has_text look for in the
+#: program file (a current engine carries them).  --prompt-cache-spread must be present so engine_args keeps the
+#: checkpoint policy a current engine understands (#6870); without it the snapshot looks like an older binary.
 ENGINE_STUB = (b"STRATA ENGINE STUB (config snapshot)\n--mtp-draft-vocab FILE (or --mtp DIR\n--draft-fallback\n"
-               b"--spec 2 or more and --mtp DIR (for DIR/draft_vocab.bin)\nselector codebooks: Q4_0 rows\n")
+               b"--spec 2 or more and --mtp DIR (for DIR/draft_vocab.bin)\nselector codebooks: Q4_0 rows\n"
+               b"--prompt-cache-spread\n")
 
 #: Environment variables a developer or CI may have set that would leak into a start; the world starts from a clean list.
 CLEAR = ("STRATA_SETTINGS_FILE", "STRATA_CONNECTION_DIR", "CUDA_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES", "STRATA_API_KEY",
