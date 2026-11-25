@@ -827,6 +827,7 @@ class RocmSplitLayout(unittest.TestCase):
         self.assertEqual(root, usr)
         self.assertEqual(dirs, [str(usr / "lib64")])
 
+    @unittest.skipIf(setup.WIN, "Linux distro hipcc-on-PATH layout; Windows looks for hipcc.exe")
     def test_hipcc_on_path_without_rocm_path(self):
         """No ROCM_PATH at all (a distro package install): the hipcc on PATH names the prefix."""
         base = Path(self._tmp.name) / "nopath"
