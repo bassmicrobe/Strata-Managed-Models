@@ -732,9 +732,9 @@ async function runTurn({ message, history = [], onFrame, signal, client, workspa
       const inklingLocal = instance.arch === 'inkling2_loop' || /^inkling-2-mini/i.test(localModel);
       const thinkKey = String(thinking).toLowerCase();
       const effortWord = hy4Local
-        ? (thinkKey === 'xhigh' ? 'max' : ({off:'none',minimal:'high',low:'high',medium:'high',high:'high',max:'max'}[thinkKey] ?? 'high'))
+        ? (thinkKey === 'xhigh' ? 'max' : ({off:'none',minimal:'high',low:'high',medium:'high',high:'high',max:'max'}[String(thinking).toLowerCase()] ?? 'high'))
         : inklingLocal ? ({off:'none',xhigh:'max',minimal:'minimal'}[thinkKey] ?? thinkKey)
-        : ({off:'none',max:'high'}[thinkKey] ?? (thinkKey === 'xhigh' ? 'high' : thinkKey));
+        : ({off:'none',max:'high'}[String(thinking).toLowerCase()] ?? (thinkKey === 'xhigh' ? 'high' : thinkKey));
       const requestSignal = signal ? AbortSignal.any([signal, cancel.signal]) : cancel.signal;
       const contextMax = instance.metrics?.engine?.max_context ?? instance.context;
       const result = await proxyCompletion({
@@ -744,7 +744,7 @@ async function runTurn({ message, history = [], onFrame, signal, client, workspa
         images, signal: requestSignal,
         preparePayload: prepareChat({ chatId: sessionId, signal: requestSignal, onFrame, model: { contextMax } }),
         extra: { strata_mcp: useTools === true, reasoning_effort: effortWord,
-          ...(thinkingBudget > 0 && thinkKey !== 'off' ? { reasoning_budget_tokens: thinkingBudget } : {}) },
+          ...(thinkingBudget>0&&String(thinking).toLowerCase()!=='off'?{reasoning_budget_tokens:thinkingBudget}:{}) },
         systemPrompt: [SYSTEM_PROMPT, userRules.promptBlock()].filter(Boolean).join('\n\n'),
         onFrame: frame => onFrame({ ...frame, requestId: entry.id, model: instance.label, contextMax, skills: applied.map(s => s.name) }),
       });
