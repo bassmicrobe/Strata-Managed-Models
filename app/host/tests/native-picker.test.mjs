@@ -1,9 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {readFile} from 'node:fs/promises';
-import {transform} from 'esbuild';
+import {fileURLToPath} from 'node:url';
+import {build} from 'esbuild';
 
-const {code}=await transform(await readFile(new URL('../src/lib/native-picker.ts',import.meta.url),'utf8'),{loader:'ts',format:'esm'});
+const {outputFiles:[{text:code}]}=await build({entryPoints:[fileURLToPath(new URL('../src/lib/native-picker.ts',import.meta.url))],bundle:true,write:false,format:'esm'});
 const {nativePickerModels,nativePickerLoadRequest,waitForNativePickerModel}=await import(`data:text/javascript;base64,${Buffer.from(code).toString('base64')}`);
 const instance=(id,model,label,status='ready')=>({id,model,label,status,context:8192});
 const installed=(model,model_name,ready=true)=>({model,model_name,ready,config:`strata-${model}.json`,context:32768});
@@ -18,6 +18,14 @@ test('added/downloaded native models remain in the picker beside running models 
     assert.deepEqual({models,running},before);
     assert.deepEqual(nativePickerModels([installed('second','Same name')],[]).map(row=>row.model),['second']);
     assert.deepEqual(nativePickerModels(undefined,null),[]);
+});
+
+test('custom names and badges survive both downloaded and loaded picker rows',()=>{
+    const models=[{...installed('custom-a','Catalog name'),custom:true,display_name:'My tune'},installed('official','My tune')];
+    const running=[{...instance('active','custom-b','My other tune'),custom:true}];
+    assert.deepEqual(nativePickerModels(models,running).map(({model,label,custom})=>[model,label,custom]),[
+        ['custom-b','My other tune',true],['custom-a','My tune',true],['official','My tune',false],
+    ]);
 });
 
 test('a downloaded model uses its saved native load configuration and a single-model lifecycle',()=>{

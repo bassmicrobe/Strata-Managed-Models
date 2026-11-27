@@ -34,15 +34,18 @@ export function createTailscaleAccess({ origin, port } = {}) {
   const backendHosts = new Set([...LOCAL_HOSTS].map(name => port === 80 ? name : name + ':' + port));
   const isBackendHost = host => typeof host === 'string' && (backendHosts.has(host.toLowerCase()) ||
     (port === 80 && backendHosts.has(host.toLowerCase().replace(/:80$/, ''))));
+  const allowsPublicHost = req => {
+    const host = req.headers?.host;
+    if (!approved || !loopback(req.socket?.remoteAddress) ||
+        typeof host !== 'string' || !host || /[\s/?#@\\]/.test(host)) return false;
+    try { return new URL('https://' + host).origin === approved; } catch { return false; }
+  };
   const allowsProxy = req => {
     if (!approved || req.headers?.origin !== approved || !loopback(req.socket?.remoteAddress)) return false;
     const host = req.headers?.host;
     if (typeof host !== 'string' || !host || /[\s/?#@\\]/.test(host)) return false;
-    try {
-      // Serve can preserve the public Host or replace it with its loopback HTTP target.
-      if (new URL('https://' + host).origin === approved) return true;
-      return isBackendHost(host);
-    } catch { return false; }
+    // Serve can preserve the public Host or replace it with its loopback HTTP target.
+    return allowsPublicHost(req) || isBackendHost(host);
   };
   const allowsLocal = req => {
     const value = req.headers?.origin, host = req.headers?.host;
@@ -56,6 +59,7 @@ export function createTailscaleAccess({ origin, port } = {}) {
   return Object.freeze({
     origin: approved,
     allows: allowsProxy,
+    allowsPublicHost,
     // Serve's reverse proxy sets X-Forwarded-Host even for CLI requests or tagged devices without identity headers.
     // Proxy headers can only remove access. The normal API key and per-model checks still apply to a direct request.
     allowsLocalTools(req) {

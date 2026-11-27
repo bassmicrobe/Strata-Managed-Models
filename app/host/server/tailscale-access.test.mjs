@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { createServer } from 'node:net';
@@ -52,6 +52,16 @@ test('another origin, Host or remote socket cannot borrow the Tailscale exceptio
     req.socket.remoteAddress = remote;
     assert.equal(access.allows(req), false, String(remote));
   }
+});
+
+test('the public Host is trusted only for the configured authority over loopback', () => {
+  const access = createTailscaleAccess({ origin, port: 8791 });
+  const host = new URL(origin).host;
+  assert.equal(access.allowsPublicHost(request({ host })), true);
+  assert.equal(access.allowsPublicHost(request({ host, remote: '192.0.2.2' })), false);
+  assert.equal(access.allowsPublicHost(request({ host: 'other.example-tailnet.ts.net' })), false);
+  assert.equal(access.allowsPublicHost(request({ host: host + ':444' })), false);
+  assert.equal(access.allowsPublicHost(request({ host: '127.0.0.1:8791' })), false);
 });
 
 test('without an explicit origin no request obtains the proxy exception', () => {
@@ -116,9 +126,12 @@ async function freePort() {
 }
 async function hostFixture(t, configuredOrigin) {
   const home = await mkdtemp(join(tmpdir(), 'strata-tailscale-test-'));
+  const dist = join(home, 'dist');
+  await mkdir(dist);
+  await writeFile(join(dist, 'index.html'), '<!doctype html><html><head></head><body>Fixture</body></html>');
   const port = await freePort(), root = fileURLToPath(new URL('..', import.meta.url));
   const env = {
-    ...process.env, STRATA_HOME: home, STRATA_DATA_DIR: home, STRATA_MODELS_DIR: join(home, 'models'), STRATA_WORKSPACE: join(home, 'work'),
+    ...process.env, STRATA_DIST: dist, STRATA_HOME: home, STRATA_DATA_DIR: home, STRATA_MODELS_DIR: join(home, 'models'), STRATA_WORKSPACE: join(home, 'work'),
     STRATA_SETTINGS_FILE: join(home, 'settings.json'), STRATA_COMPONENTS_DIR: join(home, 'components'), STRATA_CONTROL_DIR: join(home, 'no-control'),
     STRATA_HARNESS_DIR: join(home, 'no-harness'), STRATA_NATIVE_REPO: join(home, 'no-repo'), STRATA_PORT: String(port),
     STRATA_SHARE_PORT: String(await freePort()), STRATA_TUNNEL_PORT: String(await freePort()), STRATA_BIND: '127.0.0.1',
@@ -156,7 +169,16 @@ test('the actual host permits the approved Serve origin for host APIs and the ma
     const emptyChat = await inference('/v1/chat/completions', { origin, host }, 'POST', '{}');
     assert.equal(emptyChat.status, 400); // Passed the browser gate, but cannot perform inference without a user message.
     assert.match(await emptyChat.text(), /No user message/);
-    const switched = await switchModel({ origin, host });
+    const page = await hostRequest(base + '/', { headers: { host, 'sec-fetch-site': 'none' } });
+    assert.equal(page.status, 200);
+    const token = (await page.text()).match(/name="strata-token" content="([a-f0-9]+)"/)?.[1];
+    assert.ok(token);
+    const foreignPage = await hostRequest(base + '/', { headers: { host, 'sec-fetch-site': 'cross-site' } });
+    assert.doesNotMatch(await foreignPage.text(), /name="strata-token"/);
+    assert.equal((await switchModel({ origin, host })).status, 403);
+    assert.equal((await switchModel({ origin, host, 'x-strata-token': 'incorrect' })).status, 403);
+    assert.equal((await switchModel({ origin, host, 'x-strata-token': token, 'sec-fetch-site': 'cross-site' })).status, 403);
+    const switched = await switchModel({ origin, host, 'x-strata-token': token, 'sec-fetch-site': 'same-origin' });
     assert.equal(switched.status, 404); // Auth passed; model switching remains unconfigured, so no lifecycle operation runs.
     assert.match(await switched.text(), /not configured/);
   }
@@ -165,7 +187,11 @@ test('the actual host permits the approved Serve origin for host APIs and the ma
   assert.equal((await health({ origin, host: 'other.example' })).status, 403);
   assert.equal((await fetch(base + '/api/managed-models/switch', { method: 'POST', headers: { origin, 'content-type': 'application/json' }, body: '{}' })).status, 403);
   assert.equal((await health({ origin: 'http://127.0.0.1:' + port })).status, 200);
-  assert.equal((await switchModel({ origin: 'http://127.0.0.1:' + port })).status, 404);
+  const localPage = await hostRequest(base + '/');
+  const localToken = (await localPage.text()).match(/name="strata-token" content="([a-f0-9]+)"/)?.[1];
+  assert.ok(localToken);
+  assert.equal((await switchModel({ origin: base })).status, 403);
+  assert.equal((await switchModel({ origin: base, 'x-strata-token': localToken })).status, 404);
   assert.equal((await switchModel({ origin: 'http://127.0.0.1:' + (port + 1) })).status, 403);
   assert.equal((await health({ origin: 'http://127.0.0.1:' + (port + 1) })).status, 403);
   assert.equal((await health({ origin: 'https://localhost' })).status, 403);
@@ -186,7 +212,7 @@ test('the actual default host still rejects a Tailscale browser origin and accep
   const { base, port } = await hostFixture(t);
   assert.equal((await fetch(base + '/api/health', { headers: { origin } })).status, 403);
   assert.equal((await fetch(base + '/api/health', { headers: { origin: 'http://127.0.0.1:' + port } })).status, 200);
-  assert.equal((await fetch(base + '/api/health', { headers: { origin: 'https://localhost' } })).status, 200);
+  assert.equal((await fetch(base + '/api/health', { headers: { origin: 'https://localhost' } })).status, 403);
   assert.equal((await fetch(base + '/v1/models', { headers: { origin: 'https://unrelated.example' } })).status, 403);
   const foreignChat = await fetch(base + '/v1/chat/completions', { method: 'POST', headers: { origin: 'https://unrelated.example', 'content-type': 'application/json' }, body: '{}' });
   assert.equal(foreignChat.status, 403);
