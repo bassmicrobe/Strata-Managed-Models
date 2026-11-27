@@ -1,3 +1,4 @@
+import { pickerNativeName } from './model-picker';
 import type { NativeInstance, NativeJob, NativeState } from './native';
 
 type InstalledModel = NonNullable<NativeState['installed']>['models'][number];
@@ -8,18 +9,19 @@ export interface NativePickerModel {
     status: 'installed' | NativeInstance['status'];
     instanceId?: string;
     context?: number;
+    custom?: boolean;
 }
 
 /** Model IDs are the identity: two different models can have the same display name. */
 export function nativePickerModels(installed: InstalledModel[] | null | undefined, instances: NativeInstance[] | null | undefined): NativePickerModel[] {
     const running = (instances ?? []).filter(instance => instance.status !== 'error');
     const runningModels = new Set(running.map(instance => instance.model));
-    const result: NativePickerModel[] = running.map(instance => ({ key: `instance:${instance.id}`, model: instance.model, label: instance.label, status: instance.status, instanceId: instance.id, context: instance.context }));
+    const result: NativePickerModel[] = running.map(instance => ({ key: `instance:${instance.id}`, model: instance.model, label: instance.label, status: instance.status, instanceId: instance.id, context: instance.context, custom: instance.custom === true }));
     const seen = new Set<string>();
     for (const model of installed ?? []) {
         if (!model.ready || runningModels.has(model.model) || seen.has(model.model)) continue;
         seen.add(model.model);
-        result.push({ key: `installed:${model.model}`, model: model.model, label: model.model_name || model.model, status: 'installed', context: model.context });
+        result.push({ key: `installed:${model.model}`, model: model.model, label: pickerNativeName(model), status: 'installed', context: model.context, custom: model.custom === true });
     }
     return result;
 }
